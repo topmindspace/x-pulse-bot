@@ -3,6 +3,7 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 
 // =====================================================================================================
 // X Pulse · 24-hour replay renderer (generic, data-free)
+// Renderer version 2.0.0 (2026-11-02): shockwave hierarchy + generated background music. Bump this line when the renderer changes.
 //
 // This file is a READ-ONLY, NO-NETWORK canvas page. Everything it shows comes from the single DATA object
 // below. A Grok Bot fills DATA from the X API (and its own stored baseline), replaces ONLY the DATA block
@@ -188,6 +189,7 @@ interface NodeT {
   lr: number;
   bright: number;
   rip: number;
+  tier: number; // 0 ordinary, 1 notable, 2 major shockwave (ranked by impressions + engagement relative to this day's data)
 }
 interface PartT {
   ts: number;
@@ -217,7 +219,7 @@ function buildNodes(): NodeT[] {
     if (eng(w.p) > maxEng) maxEng = eng(w.p);
     if ((w.p.impressions ?? 0) > maxV) maxV = w.p.impressions ?? 0;
   }
-  return rows.map((w, i): NodeT => {
+  const out = rows.map((w, i): NodeT => {
     const p = w.p;
     const lane = (i * 5) % 7;
     return {
@@ -236,8 +238,20 @@ function buildNodes(): NodeT[] {
       lr: 0.52 + 0.052 * lane + (((i * 37) % 11) / 11) * 0.02,
       bright: Math.log(1 + eng(p)) / Math.log(1 + maxEng),
       rip: p.impressions === null ? 0 : Math.log10(p.impressions + 1) / Math.log10(maxV + 1),
+      tier: 0,
     };
   });
+  // Shockwave tiers are relative to the day: the top ~1.2% (1..5 posts) are major, the next ~6% notable, and only if they clearly stand out
+  const wt = (n: NodeT): number => (n.v === null ? 0.5 * n.bright : n.rip + 0.15 * n.bright);
+  const rank = out.slice().sort((a, b) => wt(b) - wt(a) || a.idx - b.idx);
+  const k2 = Math.max(1, Math.min(5, Math.round(out.length * 0.012)));
+  const k1 = Math.max(1, Math.round(out.length * 0.06));
+  rank.forEach((n, j) => {
+    const w = wt(n);
+    if (j < k2 && w >= 0.6) n.tier = 2;
+    else if (j < k2 + k1 && w >= 0.45) n.tier = 1;
+  });
+  return out;
 }
 
 // Follower snapshot intervals [from, to (seconds from window start), delta in interval]; for an interval starting before the window only the share inside the window is used
@@ -566,45 +580,170 @@ function handLabel(ctx: CanvasRenderingContext2D, S: number, ah: number, cur: nu
   ctx.fillText(txt, x, y);
 }
 
-// Light-up: glow + layered impression ripples + shockwave and sparks for high-impression posts
-function fxNodes(ctx: CanvasRenderingContext2D, S: number, cur: number, xs: number[], ys: number[], st: number, ripples: boolean): void {
+
+// Shockwave life in seconds of dial time (24 h = 30 s of playback at 1x, so 11000 s is about 3.8 s of playback)
+const LIFE = [3200, 8000, 11000];
+const WHITE = [255, 248, 235];
+const BIG_IDX: number[] = NODES.filter((n) => n.tier > 0).map((n) => n.idx);
+
+// Dial shake and pulse for the major shockwaves: a few pixels, decays within a fraction of a second
+function shakeOf(cur: number, sc: number): [number, number, number] {
+  let dx = 0;
+  let dy = 0;
+  let k = 1;
+  for (const i of BIG_IDX) {
+    const n = NODES[i];
+    if (n.tier < 2) continue;
+    const age = cur - n.ts;
+    if (age < 0 || age > 1500) continue;
+    const d = Math.pow(1 - age / 1500, 2);
+    dx += Math.sin(age * 0.11 + i) * 2.6 * sc * d;
+    dy += Math.cos(age * 0.093 + i * 2) * 2.2 * sc * d;
+    k += 0.012 * d;
+  }
+  return [Math.max(-4 * sc, Math.min(4 * sc, dx)), Math.max(-4 * sc, Math.min(4 * sc, dy)), Math.min(1.03, k)];
+}
+function shakeOn(ctx: CanvasRenderingContext2D, S: number, cur: number): boolean {
+  const g = geo(S);
+  const s = shakeOf(cur, g.sc);
+  if (s[0] === 0 && s[1] === 0 && s[2] === 1) return false;
+  ctx.save();
+  ctx.translate(g.cx + s[0], g.cx + s[1]);
+  ctx.scale(s[2], s[2]);
+  ctx.translate(-g.cx, -g.cx);
+  return true;
+}
+
+// One thin, crisp ring: a faint wider trail, the coloured edge and a hot white leading edge. Radius/alpha come from the caller.
+function ring(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, col: number[], a: number, w: number, hot: number): void {
+  if (a <= 0.01 || r <= 0.5) return;
+  ctx.strokeStyle = rgba(col, a * 0.16);
+  ctx.lineWidth = w * 3.4;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, TAU2);
+  ctx.stroke();
+  ctx.strokeStyle = rgba(col, Math.min(1, a));
+  ctx.lineWidth = w;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, TAU2);
+  ctx.stroke();
+  if (hot > 0.02) {
+    ctx.strokeStyle = rgba(WHITE, Math.min(1, a * hot));
+    ctx.lineWidth = w * 0.55;
+    ctx.beginPath();
+    ctx.arc(x, y, r + w * 0.45, 0, TAU2);
+    ctx.stroke();
+  }
+}
+
+// Light-up: flash + crisp ripples. Hierarchy: ordinary posts get one small ring; notable posts two rings and a flash;
+// major posts a multi-ring shockwave with a bright leading edge, chromatic split, light bloom and sparks.
+// Budget: at most 40 ordinary rings, 8 notable and 4 major shockwaves are drawn at once (newest first); busy hours also dim ordinary glow.
+function fxNodes(ctx: CanvasRenderingContext2D, S: number, cur: number, xs: number[], ys: number[], st: number): void {
   const g = geo(S);
   const sc = g.sc;
-  const RW = 9000;
+  let act0 = 0;
+  for (let i = NODES.length - 1; i >= 0; i--) {
+    const age = cur - NODES[i].ts;
+    if (age < 0) continue;
+    if (age > LIFE[0]) break;
+    act0 += 1;
+  }
+  const dens = 1 / Math.sqrt(1 + act0 / 16);
   ctx.globalCompositeOperation = "lighter";
-  for (let i = 0; i < NODES.length; i++) {
+  let rings0 = 0;
+  for (let i = NODES.length - 1; i >= 0; i--) {
     const n = NODES[i];
     const age = cur - n.ts;
     if (age < 0) continue;
     const col = kcol(st, n.kind);
     const flash = age < 1500 ? 1 - age / 1500 : 0;
-    glowAt(ctx, col, xs[i], ys[i], (5 + 9 * n.bright + 16 * flash) * sc, 0.3 + 0.45 * n.bright + 0.5 * flash);
-    if (st === 1) glowAt(ctx, col, xs[i], ys[i], (8 + 40 * n.rip) * sc, 0.07 + 0.16 * n.rip);
-    if (ripples && age < RW) {
-      const rmax = (5 + 34 * n.rip) * sc;
-      for (let j = 0; j < 3; j++) {
-        const a2 = age - j * 900;
-        if (a2 <= 0) continue;
-        const u = a2 / RW;
-        if (u >= 1) continue;
-        ctx.strokeStyle = rgba(col, Math.pow(1 - u, 1.6) * (0.6 - 0.15 * j) * (0.4 + 0.6 * n.bright));
-        ctx.lineWidth = (1.6 - 0.35 * j) * sc;
-        ctx.beginPath();
-        ctx.arc(xs[i], ys[i], Math.max(1, rmax * (1 - Math.pow(1 - u, 2.2)) * (1 + 0.3 * j)), 0, TAU2);
-        ctx.stroke();
+    // Resting glow of a lit dot; flash is dimmed in dense hours so the overlap does not wash out
+    const fd = n.tier > 0 ? 1 : dens;
+    glowAt(ctx, col, xs[i], ys[i], (4.5 + 8 * n.bright + 14 * flash * (n.tier > 0 ? 1.4 : 1)) * sc, Math.min(0.85, (0.24 + 0.4 * n.bright) * (n.tier > 0 ? 1 : 0.5 + 0.5 * dens) + 0.45 * flash * fd));
+    if (st === 1 && n.rip > 0) glowAt(ctx, col, xs[i], ys[i], (6 + 30 * n.rip) * sc, (0.04 + 0.1 * n.rip) * (0.5 + 0.5 * dens));
+    if (n.tier === 0 && age < LIFE[0] && rings0 < 40) {
+      rings0 += 1;
+      const u = age / LIFE[0];
+      const e = 1 - Math.pow(1 - u, 2.4);
+      ring(ctx, xs[i], ys[i], (3 + 14 * n.rip) * sc * (0.35 + 0.65 * e) + sc, col, Math.pow(1 - u, 1.6) * (0.3 + 0.5 * n.bright) * (0.4 + 0.6 * dens) * 1.15, 0.95 * sc, 0);
+    }
+  }
+  // Notable and major: only the indexed few
+  let big1 = 0;
+  let big2 = 0;
+  for (let q = BIG_IDX.length - 1; q >= 0; q--) {
+    const i = BIG_IDX[q];
+    const n = NODES[i];
+    const age = cur - n.ts;
+    if (age < 0) continue;
+    let tier = n.tier;
+    if (tier === 2) {
+      if (age < LIFE[2]) {
+        big2 += 1;
+        if (big2 > 4) tier = 1;
       }
     }
-    if (n.rip > 0.78 && age < 5200) {
-      const u = age / 5200;
-      ctx.strokeStyle = rgba(col, (1 - u) * 0.85);
-      ctx.lineWidth = (3.2 * (1 - u) + 0.6) * sc;
-      ctx.beginPath();
-      ctx.arc(xs[i], ys[i], (4 + (60 + 40 * n.rip) * (1 - Math.pow(1 - u, 3))) * sc, 0, TAU2);
-      ctx.stroke();
-      for (let k = 0; k < 10; k++) {
-        const a = frac(Math.sin((i * 7 + k) * 12.9898) * 43758.5453) * TAU2;
-        const d = (8 + 46 * frac(Math.sin((i + k * 3) * 78.233) * 12345.6)) * sc * (1 - Math.pow(1 - u, 2));
-        glowAt(ctx, [255, 245, 220], xs[i] + Math.cos(a) * d, ys[i] + Math.sin(a) * d, (2.6 * (1 - u) + 0.8) * sc, 1 - u);
+    if (tier === 1) {
+      if (age < LIFE[1]) {
+        big1 += 1;
+        if (big1 > 8) continue;
+      }
+    }
+    const life = LIFE[tier];
+    if (age >= life) continue;
+    const t = age / life;
+    const col = kcol(st, n.kind);
+    const x = xs[i];
+    const y = ys[i];
+    if (tier === 2) {
+      const f = age < 1400 ? 1 - age / 1400 : 0;
+      // Light bloom: a white-hot core and a wide soft flash that decay fast
+      glowAt(ctx, WHITE, x, y, (9 + 28 * f) * sc, 0.9 * f * f + 0.12 * (1 - t));
+      glowAt(ctx, col, x, y, (40 + 110 * (1 - f * f)) * sc, 0.4 * f * f * f);
+      for (let j = 0; j < 4; j++) {
+        const d = j * 0.1;
+        const u = (t - d) / (1 - d);
+        if (u <= 0 || u >= 1) continue;
+        const rm = (62 + 78 * n.rip) * (1 - 0.17 * j) * sc;
+        const e = 1 - Math.pow(1 - u, 3.2);
+        const a = Math.pow(1 - u, 1.35) * (1 - 0.18 * j);
+        const w = (2.2 - 0.35 * j) * sc * (0.6 + 0.4 * (1 - u));
+        ring(ctx, x, y, rm * e, col, a, w, j === 0 ? 0.95 : 0.45);
+        if (j === 0) {
+          // Chromatic split on the leading ring
+          const o = 1.8 * sc * (1 - u);
+          ring(ctx, x, y, rm * e + o, st === 2 ? NEON_PK : [255, 90, 120], a * 0.5, w * 0.6, 0);
+          ring(ctx, x, y, rm * e - o, st === 2 ? NEON_CY : [90, 170, 255], a * 0.5, w * 0.6, 0);
+        }
+      }
+      // Sparks fly out as short streaks
+      const su = Math.min(1, age / 6200);
+      if (su < 1) {
+        for (let k = 0; k < 14; k++) {
+          const a = frac(Math.sin((i * 7 + k) * 12.9898) * 43758.5453) * TAU2;
+          const sp = 0.55 + 0.9 * frac(Math.sin((i + k * 3) * 78.233) * 12345.6);
+          const d1 = (10 + 78 * sp * (1 - Math.pow(1 - su, 2.4))) * sc;
+          const d0 = Math.max(0, d1 - (10 + 12 * sp) * (1 - su) * sc);
+          ctx.strokeStyle = rgba(k % 3 === 0 ? WHITE : col, (1 - su) * 0.85);
+          ctx.lineWidth = 1.1 * sc;
+          ctx.beginPath();
+          ctx.moveTo(x + Math.cos(a) * d0, y + Math.sin(a) * d0);
+          ctx.lineTo(x + Math.cos(a) * d1, y + Math.sin(a) * d1);
+          ctx.stroke();
+          glowAt(ctx, WHITE, x + Math.cos(a) * d1, y + Math.sin(a) * d1, (1.6 + 1.6 * (1 - su)) * sc, (1 - su) * 0.9);
+        }
+      }
+    } else {
+      const f = age < 800 ? 1 - age / 800 : 0;
+      glowAt(ctx, WHITE, x, y, (8 + 20 * f) * sc, 0.7 * f * f);
+      glowAt(ctx, col, x, y, (22 + 36 * (1 - f)) * sc, 0.28 * f);
+      for (let j = 0; j < 2; j++) {
+        const d = j * 0.16;
+        const u = (t - d) / (1 - d);
+        if (u <= 0 || u >= 1) continue;
+        const rm = (28 + 30 * n.rip) * (1 - 0.25 * j) * sc;
+        ring(ctx, x, y, rm * (1 - Math.pow(1 - u, 2.8)), col, Math.pow(1 - u, 1.4) * (0.85 - 0.2 * j), 1.5 * sc, j === 0 ? 0.7 : 0.2);
       }
     }
   }
@@ -639,47 +778,67 @@ function fxPaths(ctx: CanvasRenderingContext2D, cur: number, now: number, xs: nu
   ctx.globalCompositeOperation = "source-over";
 }
 
-// Galaxy / Neon: follow particles drawn into the centre
+// Follow particles: comet trail drawn into the centre, a bright head, and an arrival burst when it reaches the avatar ring
 function fxFollow(ctx: CanvasRenderingContext2D, S: number, cur: number, st: number): number {
   const g = geo(S);
   const PW = 14400;
+  const BW = 2400;
   let arriving = 0;
   ctx.globalCompositeOperation = "lighter";
   for (const p of PARTS) {
     const age = cur - p.ts;
-    if (age < 0 || age >= PW) continue;
-    const u = age / PW;
+    if (age < 0 || age >= PW + BW) continue;
     const pt = (uu: number): [number, number] => {
       const e = uu * uu * (3 - 2 * uu);
       const rr = g.rim * 0.97 + (g.rim * 0.46 - g.rim * 0.97) * e;
       const aa = p.a + (p.s - 0.5) * 0.6 * e;
       return [g.cx + Math.cos(aa) * rr, g.cx + Math.sin(aa) * rr];
     };
-    const al = 1 - Math.pow(u, 3);
+    if (age >= PW) {
+      // Arrival burst: short radial streaks, a flash and a ring expanding along the avatar ring
+      const b = (age - PW) / BW;
+      const h = pt(1);
+      const ang = Math.atan2(h[1] - g.cx, h[0] - g.cx);
+      glowAt(ctx, WHITE, h[0], h[1], (5 + 16 * b) * g.sc, 0.95 * Math.pow(1 - b, 2));
+      glowAt(ctx, PART_RGB, h[0], h[1], (10 + 26 * b) * g.sc, 0.5 * Math.pow(1 - b, 2));
+      ctx.strokeStyle = rgba(PART_RGB, 0.85 * (1 - b));
+      ctx.lineWidth = 1.2 * g.sc;
+      ctx.beginPath();
+      ctx.arc(g.cx, g.cx, g.rim * 0.46 + 2 * g.sc, ang - 0.05 - 0.5 * b, ang + 0.05 + 0.5 * b);
+      ctx.stroke();
+      for (let k = 0; k < 5; k++) {
+        const a2 = ang + (k - 2) * 0.32 + (p.s - 0.5) * 0.3;
+        const d0 = (3 + 10 * b) * g.sc;
+        const d1 = (6 + 22 * b) * g.sc;
+        ctx.strokeStyle = rgba(k === 2 ? WHITE : PART_RGB, (1 - b) * 0.9);
+        ctx.beginPath();
+        ctx.moveTo(h[0] + Math.cos(a2) * d0, h[1] + Math.sin(a2) * d0);
+        ctx.lineTo(h[0] + Math.cos(a2) * d1, h[1] + Math.sin(a2) * d1);
+        ctx.stroke();
+      }
+      continue;
+    }
+    const u = age / PW;
+    const al = 1 - Math.pow(u, 6);
     if (u > 0.85) arriving += 1;
     const h = pt(u);
-    if (st === 1) {
-      let prev = h;
-      for (let k = 1; k <= 6; k++) {
-        const q = pt(Math.max(0, u - k * 0.02));
-        ctx.strokeStyle = rgba(PART_RGB, al * (0.7 - k * 0.1));
-        ctx.lineWidth = (2.6 - k * 0.35) * g.sc;
-        ctx.beginPath();
-        ctx.moveTo(prev[0], prev[1]);
-        ctx.lineTo(q[0], q[1]);
-        ctx.stroke();
-        prev = q;
-      }
-      glowAt(ctx, PART_RGB, h[0], h[1], 7 * g.sc, al * 0.9);
-    } else {
-      for (let k = 0; k < 4; k++) {
-        const q = pt(Math.max(0, u - k * 0.025));
-        const s = (3.4 - k * 0.6) * g.sc;
-        ctx.fillStyle = rgba(k === 0 ? [255, 255, 255] : PART_RGB, al * (0.9 - k * 0.2));
-        ctx.fillRect(q[0] - s / 2, q[1] - s / 2, s, s);
-      }
-      glowAt(ctx, PART_RGB, h[0], h[1], 6 * g.sc, al * 0.6);
+    // Tapered comet tail: 8 segments, narrower and dimmer away from the head
+    let prev = h;
+    for (let k = 1; k <= 8; k++) {
+      const q = pt(Math.max(0, u - k * 0.016));
+      const f = 1 - k / 9;
+      ctx.strokeStyle = rgba(PART_RGB, al * 0.8 * f * f);
+      ctx.lineWidth = (3.0 * f + 0.4) * g.sc;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(prev[0], prev[1]);
+      ctx.lineTo(q[0], q[1]);
+      ctx.stroke();
+      prev = q;
     }
+    ctx.lineCap = "butt";
+    glowAt(ctx, PART_RGB, h[0], h[1], (6.5 + 3 * u) * g.sc, al * 0.85);
+    glowAt(ctx, WHITE, h[0], h[1], 2.4 * g.sc, al * 0.9);
   }
   ctx.globalCompositeOperation = "source-over";
   return arriving;
@@ -1206,6 +1365,7 @@ function drawStyled(canvas: HTMLCanvasElement, S: number, cur: number, now: numb
   const N = NODES.length;
   const fin = opts.fin >= 0 && opts.fin <= 1 ? Math.sin(Math.PI * opts.fin) : 0;
   const R0 = rim * 0.5;
+  const shk = shakeOn(ctx, S, cur);
   drawBg(ctx, S, now, st, opts, font);
   const ah = (cur / DAY) * TAU2 - Math.PI / 2;
   const xs: number[] = [];
@@ -1260,7 +1420,8 @@ function drawStyled(canvas: HTMLCanvasElement, S: number, cur: number, now: numb
       const age = cur - n.ts;
       if (age < 0 || age >= 9000) continue;
       const u = age / 9000;
-      act.push({ a: n.ang, amp: (3 + 30 * n.rip) * sc * (1 - u) * Math.cos(u * 9), w: 0.06 + 0.06 * n.rip });
+      const ab = n.tier === 2 ? 16 + 26 * n.rip : n.tier === 1 ? 8 + 14 * n.rip : 1.5 + 5 * n.rip;
+      act.push({ a: n.ang, amp: ab * sc * Math.pow(1 - u, 1.3) * Math.cos(u * 9), w: 0.05 + 0.05 * n.rip + 0.02 * n.tier });
     }
     ctx.globalCompositeOperation = "lighter";
     for (let pass = 0; pass < 2; pass++) {
@@ -1288,10 +1449,11 @@ function drawStyled(canvas: HTMLCanvasElement, S: number, cur: number, now: numb
       const n = NODES[i];
       const age = cur - n.ts;
       if (age < 0 || age >= 9000) continue;
+      if (n.tier === 0 && age > 3200) continue;
       const u = age / 9000;
-      const w = 0.1 + 0.5 * n.rip;
-      ctx.strokeStyle = rgba(kcol(2, n.kind), (1 - u) * (0.3 + 0.4 * n.rip));
-      ctx.lineWidth = 1.4 * sc;
+      const w = (0.06 + 0.4 * n.rip) * (n.tier === 0 ? 0.6 : 1);
+      ctx.strokeStyle = rgba(kcol(2, n.kind), (1 - u) * (n.tier === 0 ? 0.16 + 0.2 * n.rip : 0.45 + 0.4 * n.rip));
+      ctx.lineWidth = (n.tier === 0 ? 1 : 1.5) * sc;
       ctx.beginPath();
       ctx.arc(cx, cx, R0 + (rim * 0.93 - R0) * (1 - Math.pow(1 - u, 1.8)), n.ang - w, n.ang + w);
       ctx.stroke();
@@ -1329,8 +1491,9 @@ function drawStyled(canvas: HTMLCanvasElement, S: number, cur: number, now: numb
     ctx.globalCompositeOperation = "source-over";
   }
 
-  fxNodes(ctx, S, cur, xs, ys, st, st === 1);
+  fxNodes(ctx, S, cur, xs, ys, st);
   const arriving = opts.showFollow ? fxFollow(ctx, S, cur, st) : 0;
+  if (shk) ctx.restore();
   drawCenter(ctx, cx, rim * 0.45, S, now, font, opts, N, arriving, cur);
   if (hov >= 0 && hov < N) {
     ctx.lineWidth = 1.4;
@@ -1370,6 +1533,7 @@ function draw(canvas: HTMLCanvasElement, S: number, cur: number, now: number, ho
   }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, S, S);
+  const shk = shakeOn(ctx, S, cur);
   drawBg(ctx, S, now, 0, opts, font);
   const g = geo(S);
   const cx = g.cx;
@@ -1510,7 +1674,6 @@ function draw(canvas: HTMLCanvasElement, S: number, cur: number, now: number, ho
   }
 
   // Dots
-  const RW = 9000;
   for (let i = 0; i < N; i++) {
     const n = NODES[i];
     const col = COLS[n.kind];
@@ -1522,19 +1685,11 @@ function draw(canvas: HTMLCanvasElement, S: number, cur: number, now: number, ho
       ctx.fill();
       continue;
     }
-    const rmax = (5 + 30 * n.rip) * sc;
-    ctx.fillStyle = rgba(col, 0.04 + 0.08 * n.rip);
-    ctx.beginPath();
-    ctx.arc(xs[i], ys[i], rmax * 0.42, 0, TAU);
-    ctx.fill();
-    if (age < RW) {
-      const u = age / RW;
-      const e = 1 - Math.pow(1 - u, 2.2);
-      ctx.strokeStyle = rgba(col, Math.pow(1 - u, 1.5) * (0.35 + 0.55 * n.bright));
-      ctx.lineWidth = 1.3 * sc;
+    if (n.tier > 0) {
+      ctx.fillStyle = rgba(col, 0.03 + 0.05 * n.rip);
       ctx.beginPath();
-      ctx.arc(xs[i], ys[i], Math.max(1, rmax * e), 0, TAU);
-      ctx.stroke();
+      ctx.arc(xs[i], ys[i], (5 + 30 * n.rip) * sc * 0.42, 0, TAU);
+      ctx.fill();
     }
     let r = (1.7 + 1.8 * n.bright) * sc;
     const flash = age < 1500 ? 1 - age / 1500 : 0;
@@ -1558,42 +1713,396 @@ function draw(canvas: HTMLCanvasElement, S: number, cur: number, now: number, ho
   }
 
   fxPaths(ctx, cur, now, xs, ys, cx, sc);
-  fxNodes(ctx, S, cur, xs, ys, 0, true);
+  fxNodes(ctx, S, cur, xs, ys, 0);
 
   // Follow particles: only inside snapshot intervals with a real delta; triggered by the hand, drawn into the centre
-  const PW = 14400;
-  let arriving = 0;
-  const partList: PartT[] = opts.showFollow ? PARTS : [];
-  for (const p of partList) {
-    const age = cur - p.ts;
-    if (age < 0 || age >= PW) continue;
-    const u = age / PW;
-    const e = u * u * (3 - 2 * u);
-    const rr = rim * 0.97 + (rim * 0.46 - rim * 0.97) * e;
-    const aa = p.a + (p.s - 0.5) * 0.6 * e;
-    const x = cx + Math.cos(aa) * rr;
-    const y = cx + Math.sin(aa) * rr;
-    const al = 1 - Math.pow(u, 3);
-    if (u > 0.85) arriving += 1;
-    ctx.fillStyle = rgba(PART_RGB, 0.9 * al);
-    ctx.shadowColor = rgba(PART_RGB, 1);
-    ctx.shadowBlur = 8;
-    ctx.beginPath();
-    ctx.arc(x, y, 2 * sc, 0, TAU);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = rgba(PART_RGB, 0.25 * al);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(cx + Math.cos(aa) * (rr + 9 * sc), cx + Math.sin(aa) * (rr + 9 * sc));
-    ctx.stroke();
-  }
+  const arriving = opts.showFollow ? fxFollow(ctx, S, cur, 0) : 0;
+  if (shk) ctx.restore();
 
   // Centre
   drawCenter(ctx, cx, rim * 0.45, S, now, font, opts, N, arriving, cur);
   fxFinale(ctx, S, opts.fin, 0, xs, ys);
   if (opts.showTime) handLabel(ctx, S, ah, cur, font, SWEEP_RGB[0]);
+}
+
+// =====================================================================================================
+// Background music: generated live with Web Audio (no audio files, no network, nothing copyrighted).
+// Every lit dot plays one soft note on a tempo grid (A minor pentatonic, pitch and loudness follow engagement); major
+// shockwaves add a bell chord and a low swell; follower particles chime on arrival; a quiet bed (chords, pulse, arpeggio)
+// gets denser with the posting activity of the current hour. It follows play / pause / scrub / speed, starts only after a
+// click on the music buttons, and is routed through a compressor, a limiter and a soft clipper so it cannot clip.
+// If AudioContext is unavailable (sandboxed page, old browser) the buttons stay inert and everything else works.
+// =====================================================================================================
+const MUSIC_NAMES = [tx("关", "Off"), tx("律动", "Pulse"), tx("钢琴", "Piano"), tx("古典", "Classical")];
+const BPM = 100;
+const SLOT = 60 / BPM / 4; // sixteenth note
+const PENT = [0, 3, 5, 7, 10]; // A minor pentatonic
+const CHORDS: number[][] = [
+  [45, 52, 57, 60], // Am
+  [41, 48, 53, 57], // F
+  [48, 55, 60, 64], // C
+  [43, 50, 55, 59], // G
+];
+const NODE_TS: number[] = NODES.map((n) => n.ts);
+const ARR_AT: number[] = PARTS.map((p) => p.ts + 14400).sort((a, b) => a - b);
+const ACT: number[] = (() => {
+  const c: number[] = [];
+  for (let h = 0; h < 24; h++) c.push(0);
+  for (const n of NODES) c[Math.min(23, Math.floor(n.ts / 3600))] += 1 + 2 * n.bright;
+  const mx = Math.max(1, ...c);
+  return c.map((v) => Math.sqrt(v / mx));
+})();
+function actAt(cur: number): number {
+  const x = Math.max(0, Math.min(23.999, cur / 3600 - 0.5));
+  const a = Math.floor(x);
+  const f = x - a;
+  return ACT[a] * (1 - f) + ACT[Math.min(23, a + 1)] * f;
+}
+function hz(m: number): number {
+  return 440 * Math.pow(2, (m - 69) / 12);
+}
+function hsh(i: number): number {
+  return frac(Math.sin(i * 12.9898 + 4.1) * 43758.5453);
+}
+function lowerBound(arr: number[], v: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    if (arr[m] <= v) lo = m + 1;
+    else hi = m;
+  }
+  return lo;
+}
+
+class MusicEngine {
+  ctx: BaseAudioContext;
+  master: GainNode;
+  dry: GainNode;
+  send: GainNode;
+  noise: AudioBuffer;
+  style = 0;
+  private nextBed = 0;
+  private wasPlaying = false;
+  private slotUse = new Map<number, number>();
+  private ends: number[] = [];
+  private vol = 0.7;
+  constructor(ctx: BaseAudioContext) {
+    this.ctx = ctx;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -20;
+    comp.knee.value = 12;
+    comp.ratio.value = 4;
+    comp.attack.value = 0.004;
+    comp.release.value = 0.25;
+    const lim = ctx.createDynamicsCompressor();
+    lim.threshold.value = -4;
+    lim.knee.value = 0;
+    lim.ratio.value = 20;
+    lim.attack.value = 0.001;
+    lim.release.value = 0.08;
+    const clip = ctx.createWaveShaper();
+    const cv = new Float32Array(2049);
+    for (let k = 0; k < cv.length; k++) {
+      const x = (k / 1024 - 1) * 1.4;
+      cv[k] = Math.tanh(x) / Math.tanh(1.4) * 0.92;
+    }
+    clip.curve = cv;
+    this.master = ctx.createGain();
+    this.master.gain.value = this.vol;
+    this.dry = ctx.createGain();
+    this.dry.gain.value = 1;
+    this.send = ctx.createGain();
+    this.send.gain.value = 0.3;
+    // Small synthetic room: decaying stereo noise impulse
+    const sr = ctx.sampleRate;
+    const len = Math.floor(sr * 1.7);
+    const ir = ctx.createBuffer(2, len, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      let s = 12345 + ch * 777;
+      for (let k = 0; k < len; k++) {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        d[k] = ((s / 4294967296) * 2 - 1) * Math.pow(1 - k / len, 2.6);
+      }
+    }
+    const conv = ctx.createConvolver();
+    conv.buffer = ir;
+    const wlp = ctx.createBiquadFilter();
+    wlp.type = "lowpass";
+    wlp.frequency.value = 3200;
+    this.send.connect(wlp);
+    wlp.connect(conv);
+    const wet = ctx.createGain();
+    wet.gain.value = 0.55;
+    conv.connect(wet);
+    wet.connect(this.master);
+    this.dry.connect(this.master);
+    this.master.connect(comp);
+    comp.connect(lim);
+    lim.connect(clip);
+    clip.connect(ctx.destination);
+    this.noise = ctx.createBuffer(1, sr, sr);
+    const nd = this.noise.getChannelData(0);
+    let s2 = 99991;
+    for (let k = 0; k < nd.length; k++) {
+      s2 = (s2 * 1664525 + 1013904223) >>> 0;
+      nd[k] = (s2 / 4294967296) * 2 - 1;
+    }
+  }
+  setVolume(v: number): void {
+    this.vol = Math.max(0, Math.min(1, v));
+    this.master.gain.value = this.vol;
+  }
+  setStyle(s: number): void {
+    if (s !== this.style) {
+      this.style = s;
+      this.wasPlaying = false;
+      this.slotUse.clear();
+    }
+  }
+  // Voice limiter: at most 26 sounding voices; extra ones are skipped
+  private ok(t: number, dur: number): boolean {
+    this.ends = this.ends.filter((e) => e > t);
+    if (this.ends.length >= 26) return false;
+    this.ends.push(t + dur);
+    return true;
+  }
+  private tone(type: OscillatorType, f: number, t: number, a: number, dur: number, peak: number, dst: AudioNode, wet: number, cut?: [number, number, number]): void {
+    const o = this.ctx.createOscillator();
+    o.type = type;
+    o.frequency.value = f;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + a + dur);
+    let last: AudioNode = o;
+    if (cut) {
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.setValueAtTime(cut[0], t);
+      lp.frequency.exponentialRampToValueAtTime(Math.max(80, cut[1]), t + cut[2]);
+      o.connect(lp);
+      last = lp;
+    }
+    last.connect(g);
+    g.connect(dst);
+    if (wet > 0) {
+      const w = this.ctx.createGain();
+      w.gain.value = wet;
+      g.connect(w);
+      w.connect(this.send);
+    }
+    o.start(t);
+    o.stop(t + a + dur + 0.05);
+  }
+  private note(m: number, t: number, vel: number, role: number): void {
+    const f = hz(m);
+    const st = this.style;
+    const dur = Math.max(0.5, Math.min(2.4, 2.4 * Math.pow(220 / f, 0.6)));
+    if (!this.ok(t, dur + 0.1)) return;
+    if (st === 1) {
+      // electronic pluck
+      this.tone("sawtooth", f, t, 0.003, 0.2 + 0.1 * vel, 0.1 * vel, this.dry, 0.25, [5200, 500, 0.18]);
+      this.tone("square", f * 1.004, t, 0.003, 0.15, 0.04 * vel, this.dry, 0.15, [3000, 500, 0.12]);
+    } else if (st === 2) {
+      // felt piano: triangle body + decaying harmonics
+      this.tone("triangle", f, t, 0.004, dur, 0.2 * vel, this.dry, 0.35, [4200, 900, 0.5]);
+      this.tone("sine", f * 2, t, 0.003, dur * 0.5, 0.06 * vel, this.dry, 0.3);
+      this.tone("sine", f * 3.01, t, 0.002, dur * 0.25, 0.025 * vel, this.dry, 0.3);
+    } else {
+      // plucked strings / harp
+      this.tone("triangle", f, t, 0.006, dur * 0.8, 0.17 * vel, this.dry, 0.45, [3200, 700, 0.6]);
+      this.tone("sine", f * 2, t, 0.004, dur * 0.3, 0.05 * vel, this.dry, 0.4);
+      if (role === 1) this.tone("sawtooth", f, t, 0.18, dur * 0.7, 0.035 * vel, this.dry, 0.5, [1600, 900, 1]);
+    }
+  }
+  private bell(m: number, t: number, vel: number): void {
+    const f = hz(m);
+    if (!this.ok(t, 3.5)) return;
+    const R = [1, 2.76, 5.4, 8.93];
+    const G = [1, 0.5, 0.22, 0.1];
+    const D = [3.2, 2.2, 1.3, 0.8];
+    for (let k = 0; k < 4; k++) this.tone("sine", f * R[k], t, 0.002, D[k], 0.11 * vel * G[k], this.dry, 0.55);
+  }
+  private swell(t: number, m: number, vel: number): void {
+    if (!this.ok(t, 3.5)) return;
+    this.tone("sine", hz(m - 12), t, 0.09, 2.6, 0.28 * vel, this.dry, 0.2);
+    const o = this.ctx.createOscillator();
+    o.type = "sine";
+    o.frequency.setValueAtTime(110, t);
+    o.frequency.exponentialRampToValueAtTime(42, t + 0.45);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.34 * vel, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
+    o.connect(g);
+    g.connect(this.dry);
+    o.start(t);
+    o.stop(t + 0.8);
+    const ns = this.ctx.createBufferSource();
+    ns.buffer = this.noise;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(300, t);
+    bp.frequency.exponentialRampToValueAtTime(3200, t + 0.7);
+    const ng = this.ctx.createGain();
+    ng.gain.setValueAtTime(0.0001, t);
+    ng.gain.linearRampToValueAtTime(0.1 * vel, t + 0.25);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+    ns.connect(bp);
+    bp.connect(ng);
+    ng.connect(this.dry);
+    ng.connect(this.send);
+    ns.start(t);
+    ns.stop(t + 1);
+  }
+  private chime(t: number, k: number): void {
+    if (!this.ok(t, 1.2)) return;
+    const m = 81 + PENT[Math.floor(hsh(k * 3 + 1) * 5)] + (hsh(k) > 0.6 ? 12 : 0);
+    this.tone("sine", hz(m), t, 0.002, 0.9, 0.07, this.dry, 0.6);
+    this.tone("sine", hz(m + 12.02), t + 0.045, 0.002, 0.5, 0.035, this.dry, 0.6);
+  }
+  private kick(t: number): void {
+    const o = this.ctx.createOscillator();
+    o.type = "sine";
+    o.frequency.setValueAtTime(140, t);
+    o.frequency.exponentialRampToValueAtTime(46, t + 0.12);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.5, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+    o.connect(g);
+    g.connect(this.dry);
+    o.start(t);
+    o.stop(t + 0.3);
+  }
+  private hat(t: number, v: number): void {
+    const ns = this.ctx.createBufferSource();
+    ns.buffer = this.noise;
+    const hp = this.ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 7000;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.09 * v, t + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+    ns.connect(hp);
+    hp.connect(g);
+    g.connect(this.dry);
+    ns.start(t, (t * 7.3) % 0.8);
+    ns.stop(t + 0.07);
+  }
+  private pad(ms: number[], t: number, dur: number, v: number): void {
+    for (const m of ms) {
+      if (!this.ok(t, dur + 1)) return;
+      for (const dc of [-7, 7]) {
+        const o = this.ctx.createOscillator();
+        o.type = "sawtooth";
+        o.frequency.value = hz(m + 12) * Math.pow(2, dc / 1200);
+        const lp = this.ctx.createBiquadFilter();
+        lp.type = "lowpass";
+        lp.frequency.value = 1100;
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(0.022 * v, t + dur * 0.35);
+        g.gain.linearRampToValueAtTime(0.0001, t + dur + 0.9);
+        o.connect(lp);
+        lp.connect(g);
+        g.connect(this.dry);
+        g.connect(this.send);
+        o.start(t);
+        o.stop(t + dur + 1);
+      }
+    }
+  }
+  private bed(slot: number, cur: number): void {
+    const t = slot * SLOT;
+    const step = slot % 16;
+    const bar = Math.floor(slot / 16);
+    const ch = CHORDS[bar % 4];
+    const act = actAt(cur);
+    const lvl = act < 0.2 ? 0 : act < 0.45 ? 1 : act < 0.72 ? 2 : 3;
+    const st = this.style;
+    const arp = (m: number, v: number, role: number) => this.note(m, t, v, role);
+    if (st === 1) {
+      if (step % 4 === 0) this.kick(t);
+      if (step % 4 === 2 && lvl >= 1) this.hat(t, 0.8);
+      if (lvl >= 2 && step % 2 === 1 && hsh(slot) < 0.35 + 0.4 * act) this.hat(t, 0.4);
+      if (step === 0 || (lvl >= 2 && (step === 6 || step === 10))) this.tone("sawtooth", hz(ch[0]), t, 0.004, 0.32, 0.12, this.dry, 0.08, [700, 160, 0.25]);
+      const pat = lvl === 0 ? [] : lvl === 1 ? [3, 11] : lvl === 2 ? [3, 7, 11, 14] : [1, 3, 5, 7, 9, 11, 13, 15];
+      if (pat.indexOf(step) >= 0) arp(ch[1 + (step % 3)] + 12, 0.34, 0);
+    } else if (st === 2) {
+      const pat = lvl === 0 ? [0] : lvl === 1 ? [0, 8] : lvl === 2 ? [0, 4, 8, 12] : [0, 2, 4, 6, 8, 10, 12, 14];
+      const k = pat.indexOf(step);
+      if (k >= 0) arp(step === 0 ? ch[0] + 12 : ch[1 + (k % 3)] + 12, step === 0 ? 0.5 : 0.3, 0);
+    } else {
+      if (step === 0) this.pad(ch, t, 16 * SLOT, 1);
+      const pat = lvl === 0 ? [] : lvl === 1 ? [4, 12] : lvl === 2 ? [2, 6, 10, 14] : [0, 2, 4, 6, 8, 10, 12, 14];
+      const k = pat.indexOf(step);
+      if (k >= 0) arp(ch[k % 4] + 12 + (k % 8 >= 4 ? 12 : 0), 0.3, 0);
+      if (step === 0) arp(ch[0], 0.5, 1);
+    }
+  }
+  // Called once per animation frame with the audio-clock time t. prevCur/cur: dial time in seconds (0..86400).
+  frame(t: number, prevCur: number, cur: number, playing: boolean, speed: number, dtMs: number, follow: boolean): void {
+    if (this.style === 0) return;
+    if (!playing) {
+      this.wasPlaying = false;
+      return;
+    }
+    const expect = ((Math.max(1, dtMs) * speed) / 30000) * DAY;
+    const dl = cur - prevCur;
+    const jump = dl < 0 || dl > expect * 4 + 150;
+    if (!this.wasPlaying) {
+      this.wasPlaying = true;
+      this.nextBed = Math.ceil((t + 0.06) / SLOT);
+    }
+    if (this.slotUse.size > 64) {
+      const lo = Math.floor(t / SLOT) - 8;
+      for (const k of Array.from(this.slotUse.keys())) if (k < lo) this.slotUse.delete(k);
+    }
+    if (!jump && dl > 0) {
+      const lat = t + 0.025;
+      let slot = Math.round(lat / SLOT);
+      if (slot * SLOT < lat) slot += 1;
+      const when = slot * SLOT;
+      const a = lowerBound(NODE_TS, prevCur);
+      for (let i = a; i < NODES.length && NODES[i].ts <= cur; i++) {
+        const n = NODES[i];
+        const used = this.slotUse.get(slot) ?? 0;
+        const cap = this.style === 1 ? 1 : 2;
+        if (n.tier === 2) {
+          const root = CHORDS[Math.floor(slot / 16) % 4];
+          this.swell(t + 0.025, root[0], 1);
+          this.bell(root[2] + 12, t + 0.025, 1);
+          this.bell(root[3] + 24, t + 0.045, 0.7);
+        } else if (n.tier === 1) {
+          const k = Math.min(11, 5 + Math.floor(n.bright * 5));
+          this.bell(57 + 12 * Math.floor(k / 5) + PENT[k % 5], t + 0.025, 0.55);
+        }
+        if (used >= cap && n.tier === 0) continue;
+        this.slotUse.set(slot, used + 1);
+        const k = Math.max(0, Math.min(11, Math.floor((0.3 * n.rip + 0.7 * n.bright) * 7) + Math.floor(hsh(i) * 3) + (n.kind === 2 ? 2 : n.kind === 0 ? 1 : 0)));
+        const vel = 0.35 + 0.65 * Math.max(n.bright, 0.45 * n.rip) + (n.tier > 0 ? 0.2 : 0);
+        this.note(57 + 12 * Math.floor(k / 5) + PENT[k % 5], when, Math.min(1, vel), 0);
+      }
+      if (follow) {
+        const b0 = lowerBound(ARR_AT, prevCur);
+        for (let q = b0; q < ARR_AT.length && ARR_AT[q] <= cur; q++) this.chime(when + 0.01, q);
+      }
+      if (prevCur < DAY && cur >= DAY) {
+        const root = CHORDS[0];
+        this.swell(t + 0.03, root[0], 1);
+        for (let q = 0; q < 4; q++) this.bell(root[q] + 24, t + 0.03 + q * 0.07, 0.8);
+      }
+    }
+    while (this.nextBed * SLOT < t + 0.25) {
+      if (this.nextBed * SLOT >= t) this.bed(this.nextBed, cur);
+      this.nextBed += 1;
+    }
+  }
 }
 
 function Replay() {
@@ -1609,6 +2118,9 @@ function Replay() {
   const [tip, setTip] = useState<{ idx: number; pinned: boolean; left: number } | null>(null);
   const [vis, setVis] = useState<Vis>(VIS_ALL);
   const [style, setStyle] = useState<number>(0);
+  const [music, setMusic] = useState<number>(0);
+  const [vol, setVol] = useState<number>(70);
+  const [audioErr, setAudioErr] = useState<boolean>(false);
   const tipElRef = useRef<HTMLDivElement>(null);
   const [tipDy, setTipDy] = useState<number>(0);
   const actRef = useRef<{ toggle: () => void; step: (d: number) => void }>({ toggle: () => {}, step: () => {} });
@@ -1632,6 +2144,11 @@ function Replay() {
   tipRef.current = tip ? tip.idx : -1;
   fontRef.current = theme.font.family;
   const endAtRef = useRef<number>(0);
+  const musicRef = useRef<number>(0);
+  const lastMusicRef = useRef<number>(2);
+  const audRef = useRef<{ ctx: AudioContext; eng: MusicEngine } | null>(null);
+  const lastCurRef = useRef<number>(0);
+  musicRef.current = music;
   const optsRef = useRef<DrawOpts>({ tier: TIER, showFollow: true, showTime: true, style: 0, fin: -1, vis: VIS_ALL });
   optsRef.current = { tier: TIER, showFollow: vis.follow, showTime: vis.time, style, fin: optsRef.current.fin, vis };
 
@@ -1698,6 +2215,8 @@ function Replay() {
     const loop = (now: number) => {
       const dt = Math.min(100, now - last);
       last = now;
+      const cur0 = lastCurRef.current;
+      const wasPlay = playRef.current;
       if (playRef.current) {
         let p = progRef.current + (dt * speedRef.current) / 30000;
         if (p >= 1) {
@@ -1709,6 +2228,15 @@ function Replay() {
         progRef.current = p;
         setProg(p);
       }
+      const au = audRef.current;
+      if (au && musicRef.current > 0) {
+        try {
+          au.eng.frame(au.ctx.currentTime, cur0, progRef.current * DAY, wasPlay, speedRef.current, dt, optsRef.current.showFollow);
+        } catch {
+          // audio problems must never break the picture
+        }
+      }
+      lastCurRef.current = progRef.current * DAY;
       const cv = canvasRef.current;
       const o = optsRef.current;
       o.fin = endAtRef.current > 0 ? (now - endAtRef.current) / 2400 : -1;
@@ -1716,8 +2244,60 @@ function Replay() {
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      const au = audRef.current;
+      if (au) {
+        try {
+          void au.ctx.close().catch(() => undefined);
+        } catch {
+          // ignore
+        }
+        audRef.current = null;
+      }
+    };
   }, []);
+
+  // Music: the audio context is only created inside a click on the music buttons (browser autoplay rule); any failure degrades to silence
+  const pickMusic = (i: number) => {
+    try {
+      if (i > 0) lastMusicRef.current = i;
+      if (i > 0 && !audRef.current) {
+        const W = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext };
+        const AC = W.AudioContext || W.webkitAudioContext;
+        if (!AC) {
+          setAudioErr(true);
+          return;
+        }
+        const ctx = new AC();
+        const eng = new MusicEngine(ctx);
+        eng.setVolume(vol / 100);
+        audRef.current = { ctx, eng };
+      }
+      const au = audRef.current;
+      if (au) {
+        au.eng.setStyle(i);
+        if (i > 0) void au.ctx.resume().catch(() => undefined);
+        else void au.ctx.suspend().catch(() => undefined);
+      }
+      musicRef.current = i;
+      setMusic(i);
+    } catch {
+      setAudioErr(true);
+      musicRef.current = 0;
+      setMusic(0);
+    }
+  };
+  // Volume is a small custom slider (not an <input type=range>) so the progress bar stays the page's only range input.
+  const applyVol = (v: number) => {
+    setVol(v);
+    const au = audRef.current;
+    if (au) au.eng.setVolume(v / 100);
+  };
+  const volAt = (e: PointerEvent<HTMLDivElement>) => {
+    const b = e.currentTarget.getBoundingClientRect();
+    if (b.width > 0) applyVol(Math.round(Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)) * 100));
+  };
 
   const hit = (e: PointerEvent<HTMLCanvasElement>): number => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -1992,6 +2572,28 @@ function Replay() {
                 setAspect(i);
                 setTip(null);
               })}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button data-music="toggle" aria-pressed={music > 0} disabled={audioErr} title={audioErr ? tx("此环境不支持音频", "Audio is not available here") : ""} onClick={() => pickMusic(music > 0 ? 0 : lastMusicRef.current)} style={{ ...tbtn(music > 0), opacity: audioErr ? 0.45 : 1 }}>
+                {tx("🎵 音乐 · ", "🎵 Music · ") + (music > 0 ? tx("开", "On") : tx("关", "Off"))}
+              </button>
+              {seg(MUSIC_NAMES.slice(1), music - 1, (i) => pickMusic(i + 1))}
+              <div
+                role="slider"
+                aria-label={tx("音量", "Volume")}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={vol}
+                data-music="volume"
+                onPointerDown={(e) => { if (audioErr) return; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) { /* no active pointer */ } volAt(e); }}
+                onPointerMove={(e) => { if (!audioErr && e.buttons === 1) volAt(e); }}
+                style={{ width: 84, height: 22, display: "flex", alignItems: "center", cursor: audioErr ? "default" : "pointer", opacity: audioErr ? 0.4 : music > 0 ? 1 : 0.5, touchAction: "none" }}
+              >
+                <div style={{ position: "relative", width: "100%", height: 4, borderRadius: 2, background: "rgba(128,140,165,.35)" }}>
+                  <div style={{ width: vol + "%", height: "100%", borderRadius: 2, background: "#4cc9f0" }} />
+                  <div style={{ position: "absolute", left: "calc(" + vol + "% - 6px)", top: -4, width: 12, height: 12, borderRadius: 6, background: "#e8f6fb", boxShadow: "0 0 0 1px rgba(0,0,0,.25)" }} />
+                </div>
+              </div>
             </div>
             <button onClick={() => setPanel(!panel)} style={tbtn(panel)}>
               {tx("显示设置 · ", "Display · ") + nOn + "/" + VIS_TOTAL + (panel ? " ▴" : " ▾")}

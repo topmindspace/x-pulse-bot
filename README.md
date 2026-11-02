@@ -7,6 +7,7 @@
 A single-file, read-only canvas page for Grok Bot that replays an X account's last 24 hours as a dial. A clock hand sweeps once around the dial; every post, reply and quote lights up at its time, sized by impressions and coloured by kind. A centre board shows avatar, name, handle, rolling impressions / engagement / post counts, follower change, and an optional "today's status" tier.
 
 - 3 visual styles (Neuron, Galaxy, Neon wave), 3 aspect ratios (1:1, 9:16, 16:9), per-element toggles, play / pause / seek, keyboard shortcuts (Space, ← →, Shift = 1 h), pinnable tooltips with an "Open post" link.
+- Shockwave hierarchy and optional generated background music (see below).
 - UI language `en` or `zh`.
 - **No data is baked in.** All content comes from one `DATA` object. The file ships with a tiny made-up example (clearly labelled `EXAMPLE DATA` in the subtitle and footer) so it renders on its own.
 - **Read-only, no network.** The page never calls `fetch`, `XMLHttpRequest`, `WebSocket`, or loads any URL (the avatar is drawn from embedded pixels, not an image URL). Keep it that way.
@@ -23,6 +24,12 @@ Raw URL for a bot to fetch (stable, `main` branch):
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/renderer/x-pulse-replay.tsx
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avatar.py
 ```
+
+## Visuals and music (v2)
+
+**Shockwave hierarchy.** Ordinary posts get one small, crisp ring. The top ~6% by impressions (and engagement) are "notable": a flash and two sharp rings. The top ~1.2% (1 to 5 posts, never fixed thresholds) are "major": a white-hot flash, a four-ring shockwave with a bright leading edge and a chromatic split, flying sparks, and a short dial shake. Tiers are relative to the day's own data. Budgets keep it legible: at most 40 small rings, 8 notable and 4 major shockwaves at once (newest first), and busy hours dim the ordinary glow instead of washing out. New followers fly in as comets and burst on the avatar ring. Works in all three styles.
+
+**Background music (off until clicked).** The toolbar has a **🎵 Music** toggle (outside the stage, so screen recordings of the stage stay silent), three styles (Pulse, Piano, Classical) and a volume slider. Everything is generated with Web Audio: no audio files, no network, nothing copyrighted. Every lit dot plays a soft note on a 100 BPM sixteenth-note grid in A minor pentatonic (pitch and loudness follow engagement, at most 2 notes per slot); notable posts add a bell, major shockwaves a bell chord plus a low swell; each new follower chimes when it arrives; a quiet bed (pulse and bass / chords / pad and arpeggio) gets denser with the posting activity of the current hour; the end of the turn plays a closing chord. It follows play, pause, scrub and speed (a scrub or seek is silent), starts only after a click (browser autoplay rule), and goes through a compressor, a limiter and a soft clipper. If `AudioContext` is unavailable the toggle disables itself and nothing else changes. No new `DATA` fields.
 
 ## Using it from a Grok Bot (end to end)
 
@@ -101,7 +108,7 @@ Prints (or writes) `{"size":96,"palette":"…","indices":"…"}` (about 12 KB). 
 cd tests && npm install && npm test
 ```
 
-Needs Node 20+, Python 3 with Pillow, and Chrome/Chromium (`CHROME_PATH` to override `/usr/bin/google-chrome`). It type-checks the renderer (strict) and renders about 25 scenarios in headless Chrome (example data, full data in both languages, zero posts, one post, all-null metrics, first run, 600 posts, very long name, emoji name, bad avatar, unsafe URLs, bad window, other time zones…), failing on any page error, any network request, or any `NaN` / `undefined` in the page text. All scenario data is synthetic. Full run takes about 8 minutes.
+Needs Node 20+, Python 3 with Pillow, and Chrome/Chromium (`CHROME_PATH` to override `/usr/bin/google-chrome`). It type-checks the renderer (strict) and renders about 25 scenarios in headless Chrome, each also switching every music style, scrubbing, pausing and changing speed, then rendering the music offline and checking for clipping / NaN (example data, full data in both languages, zero posts, one post, all-null metrics, first run, 600 posts, very long name, emoji name, bad avatar, unsafe URLs, bad window, other time zones…), failing on any page error, any network request, or any `NaN` / `undefined` in the page text. All scenario data is synthetic. Full run takes about 8 minutes.
 
 The code comments are in English; the page itself is bilingual (`lang`).
 
@@ -118,6 +125,7 @@ The code comments are in English; the page itself is bilingual (`lang`).
 给 Grok Bot 用的单文件只读画布页面：把一个 X 账号最近 24 小时的发帖回放成一个表盘。指针转一圈，每条发帖、回复、引用在对应时刻亮起，大小看曝光、颜色看类型。中心看板显示头像、名称、ID、滚动累计的曝光 / 互动 / 条数、关注变化，以及可选的“今日状态”。
 
 - 3 种风格（神经元、星系、霓虹声波），3 种画幅（1:1、9:16、16:9），每个元素可单独开关，播放 / 暂停 / 拖动，快捷键（空格、← →、Shift = 1 小时），浮层可点击固定并带“打开帖子”链接。
+- 冲击波分级与可选的程序生成背景音乐（见下）。
 - 界面语言 `en` 或 `zh`。
 - **文件里没有任何真实数据。** 所有内容都来自一个 `DATA` 对象；自带一小份虚构示例数据（副标题和页脚都会标明“示例数据”），所以能单独渲染。
 - **只读、不联网。** 页面不调用 `fetch`、`XMLHttpRequest`、`WebSocket`，也不加载任何 URL（头像用内嵌像素绘制，不是图片链接）。请保持这一点。
@@ -134,6 +142,12 @@ Bot 取文件用的稳定原始链接（`main` 分支）：
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/renderer/x-pulse-replay.tsx
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avatar.py
 ```
+
+## 视觉与音乐（v2）
+
+**冲击波分级。** 普通帖子只有一圈小而锐利的涟漪；曝光（及互动）排名前约 6% 为“显著”：一次闪光加两圈锐利的环；前约 1.2%（1 到 5 条，不用固定阈值）为“重磅”：白热闪光、四层带亮色前沿和色散分离的冲击波、飞散火花，以及表盘轻微震动。分级完全相对当天的数据。为避免糊成一片设有预算：同时最多 40 个小涟漪、8 个显著和 4 个重磅冲击波（新的优先），繁忙时段会压低普通光晕的亮度而不是叠成一片白。新增关注以彗星拖尾飞入，到头像环处迸发。三种风格都适用。
+
+**背景音乐（点击后才开）。** 工具栏有 **🎵 音乐** 开关（在舞台之外，所以只录舞台的录屏仍是无声的），三种风格（律动、钢琴、古典）和音量滑块。全部用 Web Audio 现场生成：没有音频文件、不联网、没有版权音乐。每个亮起的光点在 100 BPM 十六分音符网格上弹一个轻柔音符（A 小调五声音阶，音高和力度跟随互动，每格最多 2 个音）；显著帖子加一声钟音，重磅冲击波加钟音和弦与低频下沉；每个新增关注到达时有一声风铃；安静的底层（律动与低音 / 和弦与铺底 / 琶音）随当前小时的发帖活跃度变密；转满一圈时奏一个收尾和弦。音乐跟随播放、暂停、拖动和倍速（拖动或跳转时静音），只在点击后启动（浏览器自动播放限制），并经过压缩器、限幅器和软削波，不会爆音。如果环境没有 `AudioContext`，开关会自动禁用，其余功能不受影响。不新增任何 `DATA` 字段。
 
 ## 在 Grok Bot 里怎么用（完整流程）
 
@@ -191,6 +205,6 @@ python3 tools/build_avatar.py ./me.png --size 96 --colors 64
 cd tests && npm install && npm test
 ```
 
-需要 Node 20+、带 Pillow 的 Python 3、Chrome / Chromium（用 `CHROME_PATH` 覆盖默认的 `/usr/bin/google-chrome`）。会对渲染器做严格类型检查，并在无头 Chrome 里渲染约 25 个场景（示例数据、中英文完整数据、零帖子、单帖子、指标全缺失、首次运行、600 条帖子、超长名称、emoji 名称、坏头像、不安全链接、坏窗口、其他时区等），出现页面错误、网络请求或页面文字里的 `NaN` / `undefined` 都算失败。所有场景数据均为虚构。完整运行约 8 分钟。
+需要 Node 20+、带 Pillow 的 Python 3、Chrome / Chromium（用 `CHROME_PATH` 覆盖默认的 `/usr/bin/google-chrome`）。会对渲染器做严格类型检查，并在无头 Chrome 里渲染约 25 个场景，每个场景还会切换所有音乐风格、拖动、暂停、变速，并离线渲染音乐检查有没有削波或 NaN（示例数据、中英文完整数据、零帖子、单帖子、指标全缺失、首次运行、600 条帖子、超长名称、emoji 名称、坏头像、不安全链接、坏窗口、其他时区等），出现页面错误、网络请求或页面文字里的 `NaN` / `undefined` 都算失败。所有场景数据均为虚构。完整运行约 8 分钟。
 
 代码注释为英文；页面本身通过 `lang` 支持中英文。

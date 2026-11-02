@@ -64,6 +64,7 @@ const scenarios = {
   unsafe_url: baseData({ posts: mkPosts(5, false, true) }),
   bad_window: baseData({ window: { startISO: "nonsense", endISO: END, tz } }),
   out_of_window: baseData({ posts: [...mkPosts(5), { ...mkPosts(1)[0], t: "2026-10-30T00:00:00+08:00" }, { ...mkPosts(1)[0], t: "2026-11-05T00:00:00+08:00" }, { ...mkPosts(1)[0], t: "garbage" }] }),
+  no_audio: baseData({}),
   other_tz: baseData({ window: { startISO: "2026-11-01T10:00:00Z", endISO: "2026-11-02T10:00:00Z", tz: { label: "PST", offsetMinutes: -480 } }, posts: [{ ...mkPosts(1)[0], t: "2026-11-01T12:00:00Z" }] }),
 };
 
@@ -71,19 +72,22 @@ function variant(data) {
   if (data === null) return base;
   return base.slice(0, ai + A.length) + "\nconst DATA: Data = " + JSON.stringify(data) + ";\n" + base.slice(bi);
 }
+// Test-only hook (appended to the bundle, not part of the renderer): lets the harness render the music offline
+const HOOK = "\n;(window as unknown as { __ME: unknown }).__ME = { MusicEngine, NODES, DAY };\n";
 fs.mkdirSync("out", { recursive: true });
 fs.mkdirSync("src", { recursive: true });
 const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || "/usr/bin/google-chrome", headless: "new", args: ["--no-sandbox", "--disable-gpu"] });
 let fails = 0;
 for (const [name, data] of Object.entries(scenarios)) {
   if (only && name !== only) continue;
-  fs.writeFileSync("src/replay.tsx.tmp.tsx", variant(data));
+  fs.writeFileSync("src/replay.tsx.tmp.tsx", variant(data) + HOOK);
   fs.copyFileSync("src/replay.tsx.tmp.tsx", "src/replay.tmp.tsx");
   fs.writeFileSync("src/h.tsx", fs.readFileSync("harness.tsx", "utf8").replace('"./replay"', '"./replay.tmp"'));
   await esbuild.build({ entryPoints: ["src/h.tsx"], bundle: true, outfile: "out/bundle.js", alias: { "grok/canvas": path.resolve("stub/grok-canvas.tsx") }, define: { "process.env.NODE_ENV": '"production"' }, logLevel: "error", jsx: "automatic", target: "es2020" });
   fs.writeFileSync("out/index.html", '<!doctype html><html><body style="margin:0;background:#0b0f19"><div id="root"></div><script src="bundle.js"></script></body></html>');
   const page = await browser.newPage();
   await page.setViewport({ width: 1100, height: 1400 });
+  if (name === "no_audio") await page.evaluateOnNewDocument(() => { delete window.AudioContext; delete window.webkitAudioContext; });
   const errs = [];
   page.on("pageerror", (e) => errs.push("pageerror: " + e.message));
   page.on("console", (m) => { if (["error", "warning"].includes(m.type())) errs.push(m.type() + ": " + m.text()); });
@@ -126,11 +130,43 @@ for (const [name, data] of Object.entries(scenarios)) {
   for (const sty of ["Galaxy", "Neon wave", "星系", "霓虹声波", "Neuron", "神经元"]) { await click(sty); await new Promise((r) => setTimeout(r, 150)); await setRange(500); await new Promise((r) => setTimeout(r, 150)); }
   // frame rate
   const fps = await page.evaluate(() => new Promise((res) => { let n = 0; const t0 = performance.now(); const f = () => { n++; if (performance.now() - t0 > 1500) res(n / 1.5); else requestAnimationFrame(f); }; requestAnimationFrame(f); }));
+  // Music: toggle on, every style, scrub / pause / speed, volume, off; then a deterministic offline render per style (no clipping, no NaN)
+  let noAudioOk = true;
+  const music = { volume: false, toggled: false, styles: 0, fpsMusic: 0, off: false, render: [] };
+  music.toggled = await page.evaluate(() => { const b = document.querySelector('[data-music="toggle"]'); if (!b) return false; b.click(); return true; });
+  await new Promise((r) => setTimeout(r, 200));
+  if (name === "no_audio") noAudioOk = await page.evaluate(() => { const b = document.querySelector('[data-music="toggle"]'); return !!b && b.disabled && typeof AudioContext === "undefined"; });
+  for (const nm of ["律动", "Pulse", "钢琴", "Piano", "古典", "Classical"]) { if (await click(nm)) music.styles++; await new Promise((r) => setTimeout(r, 120)); await click("Restart"); await click("从头播放"); await new Promise((r) => setTimeout(r, 500)); await setRange(300); await click("Play"); await click("播放"); await new Promise((r) => setTimeout(r, 300)); await click("4x"); await click("Pause"); await click("暂停"); await setRange(800); await new Promise((r) => setTimeout(r, 100)); }
+  await page.evaluate(() => { const v = document.querySelector('[data-music="volume"]'); if (!v) return; const b = v.getBoundingClientRect(); v.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: b.left + b.width * 0.3, clientY: b.top + 5, pointerId: 1, buttons: 1 })); });
+  await new Promise((r) => setTimeout(r, 150));
+  music.volume = await page.evaluate(() => { const v = document.querySelector('[data-music="volume"]'); return !!v && document.querySelectorAll("input[type=range]").length === 1 && v.getAttribute("aria-valuenow") === "30"; });
+  await click("Restart"); await click("从头播放"); await click("1x"); await new Promise((r) => setTimeout(r, 600));
+  music.fpsMusic = Math.round(await page.evaluate(() => new Promise((res) => { let n = 0; const t0 = performance.now(); const f = () => { n++; if (performance.now() - t0 > 1500) res(n / 1.5); else requestAnimationFrame(f); }; requestAnimationFrame(f); })));
+  music.off = await page.evaluate(() => { const b = document.querySelector('[data-music="toggle"]'); if (!b) return false; b.click(); return true; });
+  await new Promise((r) => setTimeout(r, 200));
+  for (const sty of [1, 2, 3]) {
+    const rr = await page.evaluate(async (sty) => {
+      const { MusicEngine, DAY } = window.__ME;
+      const sr = 22050, speed = 4, frames = 225;
+      const ctx = new OfflineAudioContext(2, sr * 9, sr);
+      const eng = new MusicEngine(ctx); eng.setStyle(sty);
+      let prev = 0;
+      for (let k = 0; k < frames; k++) { const cur = Math.min(DAY, (k + 1) * speed * DAY / 900); eng.frame(k / 30, prev, cur, true, speed, 1000 / 30, true); prev = cur; }
+      // a scrub (jump) and a paused stretch must stay silent apart from decay
+      eng.frame(7.6, prev, DAY * 0.2, true, speed, 33, true); eng.frame(7.7, DAY * 0.2, DAY * 0.2, false, speed, 33, true);
+      const b = await ctx.startRendering();
+      let peak = 0, bad = 0, e = 0;
+      for (let c = 0; c < 2; c++) { const d = b.getChannelData(c); for (let i = 0; i < d.length; i++) { const v = d[i]; if (!Number.isFinite(v)) bad++; else { if (Math.abs(v) > peak) peak = Math.abs(v); e += v * v; } } }
+      return { peak: +peak.toFixed(3), bad, rms: +Math.sqrt(e / (2 * b.length)).toFixed(3) };
+    }, sty);
+    music.render.push(rr);
+    if (rr.bad > 0 || rr.peak > 0.999) music.clip = true;
+  }
   // avatar pixel check (stage 1:1 neuron): center top of dial
   const avatarOk = await page.evaluate(() => { const c = document.querySelector("canvas"); if (!c) return null; const x = c.getContext("2d"); const w = c.width, h = c.height; const d = x.getImageData(w * 0.5 - 20, h * 0.5 - 60, 40, 40).data; const set = new Set(); for (let i = 0; i < d.length; i += 4) set.add(d[i] + "," + d[i + 1] + "," + d[i + 2]); return set.size; });
   const bodyTxt = await page.evaluate(() => document.body.innerText);
-  const res = { name, errors: errs.length ? errs.slice(0, 4) : "none", net: net.length, hasRange, tip, fps: Math.round(fps), uniqCols: avatarOk, links: pinnedLinks.slice(0, 2), hasNaN: /NaN|undefined|Infinity|\[object/.test(bodyTxt) };
-  if (errs.length || net.length || res.hasNaN) fails++;
+  const res = { name, errors: errs.length ? errs.slice(0, 4) : "none", net: net.length, hasRange, tip, fps: Math.round(fps), music, uniqCols: avatarOk, links: pinnedLinks.slice(0, 2), hasNaN: /NaN|undefined|Infinity|\[object/.test(bodyTxt) };
+  if (errs.length || net.length || res.hasNaN || music.clip || !noAudioOk || (hasRange && name !== "no_audio" && (!music.toggled || !music.volume || music.styles < 3))) fails++;
   console.log(JSON.stringify(res));
   if (name === "example" || name === "zero_posts" || name === "firstrun") fs.writeFileSync(`out/${name}.txt`, bodyTxt);
   await page.close();

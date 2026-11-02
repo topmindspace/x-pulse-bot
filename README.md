@@ -1,21 +1,22 @@
-# X Pulse · 24-hour replay (Grok Bot canvas template)
+# X Pulse · daily replay (Grok Bot canvas template)
 
 **English** · [中文](#中文)
 
 ## What it is
 
-A single-file, read-only canvas page for Grok Bot that replays an X account's last 24 hours as a dial. A clock hand sweeps once around the dial; every post, reply and quote lights up at its time, sized by impressions and coloured by kind. A centre board shows avatar, name, handle, rolling impressions / engagement / post counts, follower change, and an optional "today's status" tier.
+A single-file, read-only canvas page for Grok Bot that replays one calendar day (or up to 7 days) of an X account as a dial. The dial is a local day, 00:00 at the top; a clock hand sweeps once around it, and every post, reply and quote lights up at its time, sized by impressions and coloured by kind. The centre board shows engagement as the headline number, the post / reply / quote counts, impressions, followers and follower change, plus a **live status word** that follows the intensity of the playhead's last hour.
 
-- 3 visual styles (Neuron, Galaxy, Neon wave), 3 aspect ratios (1:1, 9:16, 16:9), per-element toggles, play / pause / seek, keyboard shortcuts (Space, ← →, Shift = 1 h), pinnable tooltips with an "Open post" link.
+- Default window: **yesterday**, local 00:00 to 24:00 in the owner's time zone (title "Yesterday's replay" / 「昨日回放」). With several days a compact date chip row switches the dial to a day and restarts playback; the most recent day is selected first.
+- 3 visual styles (Neuron, Galaxy, Neon wave), 3 aspect ratios (1:1, 9:16, 16:9), per-element toggles, play / pause / seek, keyboard shortcuts (Space, ← →, Shift = 1 h, L = language), pinnable tooltips with an "Open post" link.
+- **Bilingual UI (EN / 中文).** The page starts in `DATA.lang` (the owner's Grok Bot language; missing or unknown means English) and a small `EN | 中文` switch in the toolbar (or the `L` key) changes every UI string live: labels, tooltips, settings groups, music names, status texts, footnotes, axis labels, legend, empty and missing states. The viewer's choice is remembered in `localStorage` (only while `DATA.lang` is unchanged; every storage failure is ignored). Post texts are never translated.
 - Shockwave hierarchy and optional generated background music (see below).
-- UI language `en` or `zh`.
-- **No data is baked in.** All content comes from one `DATA` object. The file ships with a tiny made-up example (clearly labelled `EXAMPLE DATA` in the subtitle and footer) so it renders on its own.
-- **Read-only, no network.** The page never calls `fetch`, `XMLHttpRequest`, `WebSocket`, or loads any URL (the avatar is drawn from embedded pixels, not an image URL). Keep it that way.
+- **No data is baked in.** All content comes from one `DATA` object. The file ships with a tiny made-up example (clearly labelled `EXAMPLE DATA`) so it renders on its own.
+- **Read-only, no network.** The page never calls `fetch`, `XMLHttpRequest`, `WebSocket`, or loads any URL (the avatar is drawn from embedded pixels). Keep it that way.
 
 ```
 renderer/x-pulse-replay.tsx   the page (DATA block + renderer)
 tools/build_avatar.py         profile image -> 96x96, 64-colour avatar block for DATA.avatar
-tests/                        headless-Chrome smoke tests (optional)
+tests/                        headless-Chrome tests (optional): run.mjs, lang.mjs, days.mjs, dash.mjs
 ```
 
 Raw URL for a bot to fetch (stable, `main` branch):
@@ -24,6 +25,24 @@ Raw URL for a bot to fetch (stable, `main` branch):
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/renderer/x-pulse-replay.tsx
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avatar.py
 ```
+
+## Centre dashboard and live status (v3)
+
+**Hierarchy.** Primary: **engagement** (likes + reposts + replies + quotes, rolling up to the playhead) as the largest number, with its label above it, then the **post / reply / quote counts** in the kind colours. Secondary: **impressions** and **followers**, tertiary: **follower change**. Each item still follows its own show / hide toggle; if engagement is hidden the next enabled metric becomes the headline, and rows that are off collapse so the rest re-centre. Sizes and positions are tuned for 1:1, 9:16 and 16:9, in both languages (long rows shrink to fit, never clip).
+
+**Live status word.** At the top of the centre circle, a word shows how intense the playhead's time window is *right now*. Five levels, positive wording only:
+
+| level | English | 中文 |
+| --- | --- | --- |
+| 0 | Calm | 静候 |
+| 1 | Warming up | 升温 |
+| 2 | Active | 活跃 |
+| 3 | On fire | 火热 |
+| 4 | Erupting | 爆发 |
+
+How it is computed: every post adds a weight of 1 to 3 (1, plus how its engagement and its impressions compare with this day's median), decaying with a 20-minute time constant, so the score is "recent hits" over roughly the last hour. The five cut points are quantiles of this day's own timeline (40 / 65 / 85 / 95 %) with absolute floors, so a sparse day does not "erupt" and a busy day is still graded against itself. The shown level uses smoothing, hysteresis (a level is left only after the score is 35% below its entry cut), a minimum dwell time and a short cross-fade, so it does not flicker. A scrub or a day switch snaps to the right level at once. Each level has its own micro-animation on the word (breathing glow, stronger pulse, a shimmer sweep, a beat, and at "Erupting" a tiny shake), five pips under the word show the level, the avatar aura changes with it, and the centre disc carries a very faint aurora and inner ripples that scale with the level (kept low so the numbers stay readable). With `prefers-reduced-motion` the shimmer, ripples, shake and drifting aurora are off.
+
+**Day rating (footer under the dial).** The existing day-level `DATA.days[].status` (tier 0..4 against the account's own baseline) is kept but uses different words so nothing is said twice: Standout day / Rising day / Steady day / Building day / Recharge day (高光日 / 上扬日 / 稳定日 / 蓄力日 / 充电日). It appears only when the day has a `status`. The "Status" display toggle controls both the live word and the day line.
 
 ## Visuals and music (v2)
 
@@ -36,61 +55,73 @@ https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avat
 A new owner only needs to connect X. The bot then does, on each run:
 
 1. **Fetch the renderer** from the raw URL above (once; keep the text, you only ever swap the `DATA` block).
-2. **Who am I.** `get_users_me` with `user.fields=public_metrics,profile_image_url` → `id`, `name`, `username`, current follower count (`public_metrics.followers_count`), avatar URL.
-3. **Window.** `endISO` = now, `startISO` = now − 24 h, both with the owner's UTC offset; `tz = { label, offsetMinutes }` (label is display text, e.g. `"Beijing time (UTC+8)"`). The dial spans exactly 24 h and starts at the top (not at midnight).
-4. **Posts.** `get_users_posts` for that id with `start_time` / `end_time` set to the window, `max_results=100`, `tweet.fields=created_at,public_metrics,referenced_tweets,in_reply_to_user_id`, and **follow `next_token` pagination until it is exhausted** (do not stop after the first page).
-5. **Classify** each post:
-   - `referenced_tweets` contains `retweeted` → pure retweet: **exclude**, only count it for `footnotes.retweetsExcluded`.
-   - contains `replied_to` → `kind: "reply"`; `selfThread: true` when `in_reply_to_user_id` is the owner's own id.
-   - contains `quoted` (and not `replied_to`) → `kind: "quote"`.
-   - otherwise `kind: "post"`.
-6. **Metrics.** `impressions` = `public_metrics.impression_count`, `likes` = `like_count`, `reposts` = `retweet_count`, `replies` = `reply_count`, `quotes` = `quote_count`. Anything the API did not return is **`null`**, never `0` and never estimated. `text` = the post text, `url` = `https://x.com/<username>/status/<id>`.
-7. **Followers.** Read the bot's stored baseline `{ followers, at }` from its own memory.
-   - Baseline exists: `current` = now, `baselineAt` = baseline time, `delta` = `current − baseline.followers`, `firstRun: false`.
-   - No baseline yet: `delta: null`, `baselineAt: null`, `firstRun: true` (the page then says follower change appears from the next replay).
-   - Then store `{ followers: current, at: now }` as the new baseline. Optionally pass `segments` (consecutive stored snapshots `[{ fromISO, toISO, delta }]`) to place follow particles on the dial more precisely.
-8. **Status (optional).** `status = null` hides it. Otherwise `ratio` = today's total engagement (or impressions) ÷ median of the previous windows, `tier` from the ratio (≥1.5 → 0 on fire, 1.0–1.5 → 1 rising, 0.7–1.0 → 2 steady, 0.4–0.7 → 3 charging up, < 0.4 → 4 resting), `note` = one sentence saying how it was computed.
-9. **Avatar.** `python3 tools/build_avatar.py <avatar URL> --out avatar.json` (needs Pillow), and paste the JSON into `DATA.avatar`. X's `_normal` thumbnail URL is automatically upgraded to `_400x400`. Re-use the same block on later runs unless the picture changed. `null` draws a letter placeholder.
-10. **Fill DATA.** Replace only what is between `// ===== BEGIN DATA =====` and `// ===== END DATA =====` with `const DATA: Data = { ... };`, set `example: false`, `footnotes.metricsFetchedAt` = time the metrics were read.
-11. **Publish.** The first time, pass the whole file to `WriteCanvas` and remember the returned `canvas_id`. Every later run overwrites **that same canvas** (same `canvas_id`, or `EditCanvas` on the DATA block) so the owner always has one page.
+2. **Who am I.** `get_users_me` with `user.fields=public_metrics,profile_image_url,...` → `id`, `name`, `username`, current follower count, avatar URL. Read the owner's IANA time zone (for example from the bot's memory or settings) into `tz.iana`; if it is unknown, ask once, do not guess a fixed offset.
+3. **Days.** Default: `days = [yesterday]`. Yesterday is the calendar day before today **in the owner's zone**: local 00:00 to the next local 00:00. For a multi-day replay use up to 7 consecutive days, oldest first. Compute the instants with `zoneinfo` (Python) / `Intl` and never with `± 24 h`: on DST days a day is 23 or 25 hours long, and the renderer maps the dial to the real length. Pass `date: "YYYY-MM-DD"` only, the renderer derives the real start and end itself.
+4. **Posts.** `get_users_posts` for that id with `start_time` / `end_time` set to the day's instants (UTC ISO), `max_results=100`, `tweet.fields=created_at,public_metrics,referenced_tweets,in_reply_to_user_id`, and **follow `next_token` pagination until it is exhausted**. Fetch each day once; completed past days never change much, so a bot that replays 7 days should keep the compact posts of earlier days in its own memory and only fetch the new day (see the X quota note below).
+5. **Classify** each post: `referenced_tweets` contains `retweeted` → pure retweet: **exclude** (count them for `footnotes.retweetsExcluded`); `replied_to` → reply (flag +4 when `in_reply_to_user_id` is the owner's own id); `quoted` (and not `replied_to`) → quote; otherwise post.
+6. **Metrics.** `impressions` = `public_metrics.impression_count`, then `like_count`, `retweet_count`, `reply_count`, `quote_count`. Anything the API did not return is **`null`**, never `0` and never estimated.
+7. **Followers.** Read the bot's stored baseline `{ followers, at }`. Baseline exists: `current` = now, `delta` = `current − baseline.followers`, `baselineAt` = baseline time, `firstRun: false`. No baseline: `delta: null`, `baselineAt: null`, `firstRun: true`. Then store the new baseline. Optional `segments` place follow particles more precisely. Follower data belongs to the most recent day; older days may set `current: null`.
+8. **Status (optional, per day).** `status = null` hides the day-rating footer. Otherwise `ratio` = that day's total engagement (or impressions) ÷ median of the previous days, `tier` from the ratio (≥1.5 → 0 standout, 1.0–1.5 → 1 rising, 0.7–1.0 → 2 steady, 0.4–0.7 → 3 building, < 0.4 → 4 recharge), `note` = one sentence, or `{ en, zh }`. (The live status word does not need any DATA.)
+9. **Avatar.** `python3 tools/build_avatar.py <avatar URL> --out avatar.json` (needs Pillow), paste the JSON into `DATA.avatar`. Re-use the block on later runs. `null` draws a letter placeholder.
+10. **Fill DATA.** Replace only what is between `// ===== BEGIN DATA =====` and `// ===== END DATA =====` with `const DATA: Data = { ... };`, set `example: false`, `lang` = the owner's Grok Bot language (`"en"` / `"zh"`; anything else becomes English), `footnotes.metricsFetchedAt` = the time the metrics were read (this decides which day is labelled "Yesterday").
+11. **Publish.** The first time, pass the whole file to `WriteCanvas` and remember the `canvas_id`. Every later run overwrites **that same canvas** so the owner always has one page.
 
 Bot rules: never edit anything outside the DATA block unless you are changing the renderer itself; never add network access; never invent numbers (use `null`).
 
-## DATA schema
+## DATA schema (v3)
 
 ```ts
 type Num = number | null;
+type Note = string | { en?: string; zh?: string };
 interface Data {
-  lang: "en" | "zh";                     // UI language
-  example: boolean;                      // true = placeholder data, page says so in subtitle + footer
-  account: { name: string; username: string };   // "@" prefix optional; empty strings hide the item
+  lang: "en" | "zh";          // initial UI language; missing / unknown => "en"; the viewer can switch on the page
+  example: boolean;           // true = placeholder data, page says so
+  account: { name: string; username: string };   // "@" optional; empty strings hide the item
   avatar: { size: number; palette: string; indices: string } | null;
-        // size   pixels per side (96)
-        // palette base64, 3 bytes (R,G,B) per colour (<= 64 colours)
-        // indices base64, size*size bytes, row-major palette indices
-  window: { startISO: string; endISO: string;    // exactly 24 h apart, ISO 8601 with offset
-            tz: { label: string; offsetMinutes: number } };   // display only
-  posts: {
-    t: string;                           // ISO time
-    kind: "post" | "reply" | "quote";    // pure retweets are NOT included
-    selfThread: boolean;                 // reply to own post
-    text: string;
-    impressions: Num; likes: Num; reposts: Num; replies: Num; quotes: Num;   // null = missing
-    url: string | null;                  // only https://x.com/... or https://twitter.com/... becomes a link
-  }[];
-  followers: {
-    current: Num;                        // followers now
-    delta: Num;                          // net change since baseline, null when unknown
-    baselineAt: string | null;           // ISO time of the baseline snapshot
-    firstRun: boolean;                   // no baseline yet (delta must be null)
-    segments?: { fromISO: string; toISO: string; delta: number }[];
+  tz: {
+    iana: string;             // REQUIRED, e.g. "Asia/Shanghai", "America/New_York", "Asia/Kolkata", "Asia/Kathmandu"
+    label?: string;           // display name only (default: the iana id)
+    // legacy fallback when iana is missing: offsetMinutes?: number (fixed offset, no DST)
   };
-  status: { tier: number; ratio: Num; note: string } | null;   // tier 0..4, see step 8
-  footnotes: { metricsFetchedAt: string | null; retweetsExcluded: Num; extra: string[] };
+  days: {                     // 1..7 entries, oldest first; the LAST one is selected on load
+    date: string;             // "YYYY-MM-DD", the local calendar day
+    posts: (number | string | null)[][];   // compact rows, see below; retweets are NOT included
+    followers: { current: Num; delta: Num; baselineAt: string | null; firstRun: boolean;
+                 segments?: { fromISO: string; toISO: string; delta: number }[] };
+    status: { tier: number; ratio: Num; note: Note } | null;   // day rating, tier 0..4, see step 8
+  }[];
+  footnotes: { metricsFetchedAt: string | null; retweetsExcluded: Num; extra: Note[] };
 }
 ```
 
-Behaviour worth knowing: posts outside the window or with an unparsable time are skipped; items with no data (no status, no baseline, no name…) are hidden instead of showing zeros; a long name shrinks and wraps onto two lines, it is never truncated; an invalid avatar falls back to the letter placeholder; an invalid window shows a clear error text instead of a broken dial.
+**Compact post row** (one array per post):
+
+```
+[ t, flags, impressions, likes, reposts, replies, quotes, id, snippet ]
+```
+
+| index | field | meaning |
+| --- | --- | --- |
+| 0 | `t` | unix seconds; or **seconds since the start of that local day** (any number below 1e8, the shortest form); or an ISO string |
+| 1 | `flags` | `kind` + 4 when it is a reply to the owner's own post; kind: 0 post, 1 reply, 2 quote |
+| 2–6 | metrics | numbers, or `null` = missing (never estimated) |
+| 7 | `id` | tweet id as a string of digits, or `null`; the link is `https://x.com/i/status/<id>` (only built from digits) |
+| 8 | `snippet` | short text for the hover card, about 20 characters, or `null`; cut to 40 characters on grapheme boundaries if longer |
+
+Posts do not need their full text: the renderer shows the snippet only, and tolerates a missing one. Rows outside the day, or with an unparsable `t`, are skipped. The old object form `{ t, kind, selfThread, text, impressions, likes, reposts, replies, quotes, url }` and the old v2 single-window DATA (`window`, `posts`, `followers`, `status` at the top level) still render, as one day.
+
+`status.note` and `footnotes.extra[]` may be a plain string or `{ en, zh }`. A plain note in `status.note` is shown only while the page language matches it (CJK text counts as Chinese, anything else as English); an `{ en, zh }` object shows the current language and nothing if that language is missing; plain strings in `extra` are always shown.
+
+**Size.** Measured with 7 days × 300 posts: 165 KB as unix-time rows with 18-digit ids and 20-character snippets; 154 KB with relative seconds; 121 KB (relative seconds, snippets, no ids); 119 KB (ids, no snippets); 85 KB (relative seconds only). The renderer itself is about 140 KB, and Grok Bot's canvas write limit was seen near 213 KB for the whole file, so a 7-day page with 300 posts every day does not fit. Keep each day to the posts that matter (for example the top 100 by engagement, plus a count in `footnotes.extra`), or send fewer days. Rendering stays at 60 fps with 7 days × 300 posts, and with 600 posts on one day.
+
+Behaviour worth knowing: items with no data (no status, no baseline, no name…) are hidden instead of showing zeros; a long name shrinks and wraps, it is never truncated; an invalid avatar falls back to the letter placeholder; an unknown `tz.iana`, a missing `tz`, or a bad `date` shows a clear error text instead of a broken dial.
+
+## Worldwide notes
+
+- **Time zone.** Day boundaries and every displayed time come from `tz.iana` through `Intl.DateTimeFormat`, so DST (23 h and 25 h days, the dial then spans the real length and ticks sit on real local hours; a skipped midnight such as America/Sao_Paulo 2018-11-04 starts the day at 01:00), half-hour and 45-minute offsets (Asia/Kolkata, Asia/Kathmandu, Australia/Lord_Howe) and extreme offsets (+14, −12) work. Posts are bucketed by the local day. The fill script can use Python `zoneinfo`: `datetime(y, m, d, tzinfo=ZoneInfo(iana))` for the start, the next date's midnight for the end.
+- **Language.** UI languages are `en` and `zh` only. Post snippets are shown as written; very long ones are cut by grapheme, so emoji and CJK are never split.
+- **X API quota.** The bot's X access is metered per user (about 1000 calls per day, 30 per minute): fetch the owner's posts once per day (paging with `next_token`), do not poll, and keep earlier days' compact rows in the bot's own memory instead of fetching them again.
+- **Accessibility.** With `prefers-reduced-motion: reduce` playback does not start by itself, dial shake, finale flash and the status shimmer / ripples are off. Music is always off until clicked. The toolbar buttons are real buttons (keyboard focusable), the dial and the progress slider carry labels, and the main numbers use light text on the dark stage (dimmer colours are only for secondary labels).
 
 ## Avatar helper
 
@@ -108,32 +139,40 @@ Prints (or writes) `{"size":96,"palette":"…","indices":"…"}` (about 12 KB). 
 cd tests && npm install && npm test
 ```
 
-Needs Node 20+, Python 3 with Pillow, and Chrome/Chromium (`CHROME_PATH` to override `/usr/bin/google-chrome`). It type-checks the renderer (strict) and renders about 25 scenarios in headless Chrome, each also switching every music style, scrubbing, pausing and changing speed, then rendering the music offline and checking for clipping / NaN (example data, full data in both languages, zero posts, one post, all-null metrics, first run, 600 posts, very long name, emoji name, bad avatar, unsafe URLs, bad window, other time zones…), failing on any page error, any network request, or any `NaN` / `undefined` in the page text. All scenario data is synthetic. Full run takes about 8 minutes.
+Needs Node 20+, Python 3 with Pillow, and Chrome / Chromium (`CHROME_PATH` to override `/usr/bin/google-chrome`). `npm test` builds a sample avatar, type-checks the renderer (strict) and runs four scripts in headless Chrome:
 
-The code comments are in English; the page itself is bilingual (`lang`).
+- `run.mjs` (about 8 minutes): about 25 scenarios (example data, full data in both languages, zero / one / 600 posts, all-null metrics, first run, very long and emoji names, bad avatar, unsafe URLs, bad window, other time zones…), each also switching every music style, scrubbing, pausing and changing speed, then rendering the music offline; fails on any page error, network request or `NaN` / `undefined` in the page.
+- `lang.mjs`: language seeding (`en`, `zh`, missing, unknown, `zh-CN`), switching by button and `L`, no leftover other-language words in the page or on the canvas, notes, `localStorage` rules (including a denied or corrupt store), layout at 1:1, 9:16, 16:9 and 390 px wide, screenshots in `tests/out/lang/`.
+- `days.mjs`: day boundaries for 15 zone / date cases (DST 23 h / 25 h, +05:30, +05:45, +14, −12, a 30-minute DST shift, a skipped midnight), tick counts, local-day bucketing around midnight and the repeated hour, chips and day switching at three widths, relative-time rows, legacy data, error messages, grapheme cutting, size numbers and frame rate for 7 days × 300 posts.
+- `dash.mjs`: live status at calm / busy / peak moments in both languages and all three ratios, level changes during real playback, centre-dashboard screenshots in `tests/out/dash/`.
+
+All scenario data is synthetic.
+
+The code comments are in English; the page itself is bilingual.
 
 ---
 
 <a id="中文"></a>
 
-# X 脉搏 · 24 小时回放（Grok Bot 画布模板）
+# X 脉搏 · 每日回放（Grok Bot 画布模板）
 
-[English](#x-pulse--24-hour-replay-grok-bot-canvas-template) · **中文**
+[English](#x-pulse--daily-replay-grok-bot-canvas-template) · **中文**
 
 ## 这是什么
 
-给 Grok Bot 用的单文件只读画布页面：把一个 X 账号最近 24 小时的发帖回放成一个表盘。指针转一圈，每条发帖、回复、引用在对应时刻亮起，大小看曝光、颜色看类型。中心看板显示头像、名称、ID、滚动累计的曝光 / 互动 / 条数、关注变化，以及可选的“今日状态”。
+给 Grok Bot 用的单文件只读画布页面：把一个 X 账号的一个自然日（或最多 7 天）回放成一个表盘。表盘是用户当地的一整天，0 点在顶部；指针转一圈，每条发帖、回帖、引用在对应时刻亮起，大小看曝光、颜色看类型。中心看板以互动数为主角，并显示发帖 / 回帖 / 引用条数、曝光、粉丝、关注变化，再加一个跟随播放头最近一小时强度实时变化的**状态词**。
 
-- 3 种风格（神经元、星系、霓虹声波），3 种画幅（1:1、9:16、16:9），每个元素可单独开关，播放 / 暂停 / 拖动，快捷键（空格、← →、Shift = 1 小时），浮层可点击固定并带“打开帖子”链接。
+- 默认窗口：**昨天**，即用户所在时区的当地 0 点到 24 点（标题「昨日回放」/ "Yesterday's replay"）。有多天时会出现紧凑的日期按钮行，点击切换表盘到那一天并重新播放，默认选中最近一天。
+- 3 种风格（神经元、星系、霓虹声波），3 种画幅（1:1、9:16、16:9），每个元素可单独开关，播放 / 暂停 / 拖动，快捷键（空格、← →、Shift = 1 小时、L = 语言），浮层可点击固定并带“打开帖子”链接。
+- **界面中英双语（EN / 中文）。** 页面以 `DATA.lang`（用户 Grok Bot 的语言；缺失或无法识别时为英文）起步，工具栏里有紧凑的 `EN | 中文` 切换（或按 `L` 键），所有界面文字即时切换：标签、浮层、设置分组、音乐名称、状态文字、脚注、坐标轴、图例、空数据和缺失提示。观看者的选择记在 `localStorage`（仅在 `DATA.lang` 不变时沿用；存储失败一律忽略）。帖子文本不翻译。
 - 冲击波分级与可选的程序生成背景音乐（见下）。
-- 界面语言 `en` 或 `zh`。
-- **文件里没有任何真实数据。** 所有内容都来自一个 `DATA` 对象；自带一小份虚构示例数据（副标题和页脚都会标明“示例数据”），所以能单独渲染。
-- **只读、不联网。** 页面不调用 `fetch`、`XMLHttpRequest`、`WebSocket`，也不加载任何 URL（头像用内嵌像素绘制，不是图片链接）。请保持这一点。
+- **文件里没有任何真实数据。** 所有内容都来自一个 `DATA` 对象；自带一小份虚构示例（会标明“示例数据”），所以能单独渲染。
+- **只读、不联网。** 页面不调用 `fetch`、`XMLHttpRequest`、`WebSocket`，也不加载任何 URL（头像用内嵌像素绘制）。请保持这一点。
 
 ```
 renderer/x-pulse-replay.tsx   页面（DATA 数据块 + 渲染器）
 tools/build_avatar.py         头像图片 -> 96x96、64 色的 DATA.avatar 数据块
-tests/                        无头 Chrome 冒烟测试（可选）
+tests/                        无头 Chrome 测试（可选）：run.mjs、lang.mjs、days.mjs、dash.mjs
 ```
 
 Bot 取文件用的稳定原始链接（`main` 分支）：
@@ -142,6 +181,24 @@ Bot 取文件用的稳定原始链接（`main` 分支）：
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/renderer/x-pulse-replay.tsx
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avatar.py
 ```
+
+## 中心看板与实时状态（v3）
+
+**层级。** 主角是**互动**（赞 + 转发 + 回复 + 引用，累计到播放头），数字最大、标签在其上方；其次是按类型着色的**发帖 / 回帖 / 引用条数**；再次是**曝光**和**粉丝**，最后是**关注变化**。每一项仍受各自的显示开关控制：互动关掉时下一个已开启的指标升为主角，关掉的行会收起，其余内容自动重新居中。字号和位置针对 1:1、9:16、16:9 和中英文都做了调整（过长的行会缩小以适应，不会被裁切）。
+
+**实时状态词。** 中心圆顶部的词表示播放头所在时间窗口*此刻*有多热，共五级，只用正向措辞：
+
+| 级别 | 中文 | English |
+| --- | --- | --- |
+| 0 | 静候 | Calm |
+| 1 | 升温 | Warming up |
+| 2 | 活跃 | Active |
+| 3 | 火热 | On fire |
+| 4 | 爆发 | Erupting |
+
+算法：每条帖子贡献 1 到 3 的权重（1，加上它的互动和曝光相对当天中位数的高低），按 20 分钟时间常数衰减，所以得分就是“最近约一小时的爆款”。五级的分界点取自当天自己的时间线分位数（40 / 65 / 85 / 95 %）并设绝对下限，因此内容稀少的一天不会“爆发”，繁忙的一天也只和自己比。显示的级别带平滑、迟滞（得分比进入该级的分界低 35% 才会降级）、最短停留时间和短暂的淡入淡出，不会闪烁；拖动或切换日期时立即跳到正确级别。每一级在词上有各自的微动效（呼吸光晕、更强的脉冲、扫光、心跳节拍，“爆发”还有轻微抖动），词下方有 5 个小圆点表示级别，头像光环随之变化，中心圆底有极淡的极光和内圈涟漪随级别增强（保持很淡，数字依然清楚）。开启系统“减少动态效果”时，扫光、涟漪、抖动和漂移的极光都会关闭。
+
+**当日评级（表盘下方的页脚）。** 原有的按天 `DATA.days[].status`（对照账号自身基线的 tier 0..4）保留，但用不同的词，避免同一个意思说两遍：高光日 / 上扬日 / 稳定日 / 蓄力日 / 充电日（Standout day / Rising day / Steady day / Building day / Recharge day）。只有当天有 `status` 时才显示。“状态”显示开关同时控制实时状态词和这一行。
 
 ## 视觉与音乐（v2）
 
@@ -154,40 +211,57 @@ https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avat
 新用户只需要连接 X。之后每次运行 bot 这样做：
 
 1. **取渲染器**：从上面的原始链接下载一次，之后只替换 `DATA` 块，其余不动。
-2. **我是谁**：`get_users_me`，`user.fields=public_metrics,profile_image_url`，得到 `id`、`name`、`username`、当前粉丝数（`public_metrics.followers_count`）和头像 URL。
-3. **窗口**：`endISO` = 现在，`startISO` = 现在 − 24 小时，都带上用户的时区偏移；`tz = { label, offsetMinutes }`（label 只用于显示，例如 `"北京时间 (UTC+8)"`）。表盘正好 24 小时，起点在顶部（不是 0 点）。
-4. **帖子**：对该 id 调 `get_users_posts`，`start_time` / `end_time` 设为窗口，`max_results=100`，`tweet.fields=created_at,public_metrics,referenced_tweets,in_reply_to_user_id`，并且**一直翻 `next_token` 直到取完**（不能只取第一页）。
-5. **分类**：
-   - `referenced_tweets` 含 `retweeted` → 纯转推：**排除**，只计入 `footnotes.retweetsExcluded`。
-   - 含 `replied_to` → `kind: "reply"`；当 `in_reply_to_user_id` 是自己的 id 时 `selfThread: true`。
-   - 含 `quoted`（且不含 `replied_to`）→ `kind: "quote"`。
-   - 其余 → `kind: "post"`。
-6. **指标**：`impressions` = `public_metrics.impression_count`，`likes` = `like_count`，`reposts` = `retweet_count`，`replies` = `reply_count`，`quotes` = `quote_count`。API 没返回的一律是 **`null`**，不要写 0，也不要估算。`text` 为帖子文本，`url` 为 `https://x.com/<username>/status/<id>`。
-7. **关注变化**：从 bot 自己的记忆里读已保存的基线 `{ followers, at }`。
-   - 有基线：`current` = 当前粉丝数，`baselineAt` = 基线时间，`delta` = `current − baseline.followers`，`firstRun: false`。
-   - 没有基线：`delta: null`、`baselineAt: null`、`firstRun: true`（页面会提示关注变化从下一次回放开始显示）。
-   - 然后把 `{ followers: current, at: 现在 }` 存为新基线。可选传 `segments`（相邻已存快照 `[{ fromISO, toISO, delta }]`），让关注粒子在表盘上的位置更准。
-8. **今日状态（可选）**：`status = null` 则不显示。否则 `ratio` = 今日总互动（或曝光）÷ 之前若干个窗口的中位数；`tier` 按倍数取（≥1.5 → 0 火热，1.0–1.5 → 1 上扬，0.7–1.0 → 2 在线，0.4–0.7 → 3 蓄力，<0.4 → 4 充电）；`note` 用一句话说明算法。
-9. **头像**：`python3 tools/build_avatar.py <头像 URL> --out avatar.json`（需要 Pillow），把 JSON 填进 `DATA.avatar`。X 默认的 `_normal` 小图地址会自动换成 `_400x400`。头像没变就复用上次的数据块；填 `null` 则画一个首字母占位。
-10. **填 DATA**：只替换 `// ===== BEGIN DATA =====` 与 `// ===== END DATA =====` 之间的内容为 `const DATA: Data = { ... };`，把 `example` 改成 `false`，`footnotes.metricsFetchedAt` 填读取指标的时间。
-11. **发布**：第一次把整个文件交给 `WriteCanvas`，记住返回的 `canvas_id`；以后每次都覆盖**同一个画布**（同一个 `canvas_id`，或用 `EditCanvas` 只改 DATA 块），用户始终只有一个页面。
+2. **我是谁**：`get_users_me`，`user.fields=public_metrics,profile_image_url,…`，得到 `id`、`name`、`username`、当前粉丝数和头像 URL。把用户的 IANA 时区（例如来自 bot 的记忆或设置）填进 `tz.iana`；不知道就问一次，不要猜一个固定偏移。
+3. **日期**：默认 `days = [昨天]`。昨天是**用户所在时区**里今天的前一个自然日：当地 0 点到下一个当地 0 点。多天回放最多取 7 个连续日，旧的在前。时刻用 `zoneinfo`（Python）/ `Intl` 计算，不要用 `± 24 小时`：遇到夏令时，一天可能是 23 或 25 小时，渲染器会按真实长度铺满表盘。只需传 `date: "YYYY-MM-DD"`，起止时刻由渲染器自己推算。
+4. **帖子**：对该 id 调 `get_users_posts`，`start_time` / `end_time` 设为当天起止的 UTC ISO 时刻，`max_results=100`，`tweet.fields=created_at,public_metrics,referenced_tweets,in_reply_to_user_id`，并且**一直翻 `next_token` 直到取完**。每一天只取一次；已过去的日子基本不再变化，所以回放 7 天的 bot 应把更早几天的紧凑数据存在自己的记忆里，只取新增的一天（见下面的 X 配额）。
+5. **分类**：`referenced_tweets` 含 `retweeted` → 纯转推：**排除**（只计入 `footnotes.retweetsExcluded`）；含 `replied_to` → 回帖（`in_reply_to_user_id` 是自己的 id 时 flags 加 4）；含 `quoted`（且不含 `replied_to`）→ 引用；其余为发帖。
+6. **指标**：`impressions` = `public_metrics.impression_count`，再依次是 `like_count`、`retweet_count`、`reply_count`、`quote_count`。API 没返回的一律是 **`null`**，不要写 0，也不要估算。
+7. **关注变化**：读 bot 已保存的基线 `{ followers, at }`。有基线：`current` = 当前粉丝数，`delta` = `current − baseline.followers`，`baselineAt` = 基线时间，`firstRun: false`；没有基线：`delta: null`、`baselineAt: null`、`firstRun: true`；然后保存新基线。可选 `segments` 让关注粒子位置更准。关注数据属于最近一天，更早的日子可以把 `current` 设为 `null`。
+8. **当日评级（可选，按天）**：`status = null` 则不显示页脚评级。否则 `ratio` = 当天总互动（或曝光）÷ 之前几天的中位数；`tier` 按倍数取（≥1.5 → 0 高光，1.0–1.5 → 1 上扬，0.7–1.0 → 2 稳定，0.4–0.7 → 3 蓄力，<0.4 → 4 充电）；`note` 用一句话说明，或写成 `{ en, zh }`。（实时状态词不需要任何 DATA。）
+9. **头像**：`python3 tools/build_avatar.py <头像 URL> --out avatar.json`（需要 Pillow），把 JSON 填进 `DATA.avatar`，之后复用同一个块；填 `null` 则画首字母占位。
+10. **填 DATA**：只替换 `// ===== BEGIN DATA =====` 与 `// ===== END DATA =====` 之间的内容为 `const DATA: Data = { ... };`，`example` 设为 `false`，`lang` = 用户 Grok Bot 的语言（`"en"` / `"zh"`，其他值按英文处理），`footnotes.metricsFetchedAt` 填读取指标的时间（它决定哪一天标成“昨日”）。
+11. **发布**：第一次把整个文件交给 `WriteCanvas`，记住返回的 `canvas_id`；以后每次都覆盖**同一个画布**，用户始终只有一个页面。
 
 Bot 守则：除非在改渲染器本身，否则不要改 DATA 块以外的任何内容；不要加任何网络访问；不要编造数字（缺失就写 `null`）。
 
-## DATA 结构
+## DATA 结构（v3）
 
 字段与上面 English 部分的 TypeScript 定义一致。要点：
 
-- `lang`：`"en"` 或 `"zh"`；`example`：`true` 表示占位数据，页面会标明。
-- `account`：`name`、`username`（`@` 可有可无；空字符串则不显示）。
-- `avatar`：`{ size, palette, indices }` 或 `null`。`palette` 是 base64 调色板（每色 3 字节 RGB，不超过 64 色），`indices` 是 base64 的 `size*size` 个调色板索引（按行）。
-- `window`：`startISO`、`endISO`（正好相隔 24 小时，ISO 8601 带时区偏移），`tz` 只用于显示。
-- `posts[]`：`t`、`kind`（`post` / `reply` / `quote`，不含纯转推）、`selfThread`、`text`、`impressions` / `likes` / `reposts` / `replies` / `quotes`（数字或 `null` = 缺失）、`url`（只有 `https://x.com/…` 或 `https://twitter.com/…` 会变成链接，其余忽略）。
-- `followers`：`current`、`delta`、`baselineAt`、`firstRun`、可选 `segments`。
-- `status`：`{ tier 0..4, ratio, note }` 或 `null`。
+- `lang`：`"en"` 或 `"zh"`，是初始界面语言（缺失或无法识别 => 英文），观看者可在页面上切换；`example`：`true` 表示占位数据。
+- `account`：`name`、`username`（`@` 可有可无；空字符串则不显示）。`avatar`：`{ size, palette, indices }` 或 `null`。
+- `tz`：`iana` **必填**（如 `"Asia/Shanghai"`、`"America/New_York"`、`"Asia/Kolkata"`、`"Asia/Kathmandu"`），`label` 仅作显示名。缺少 `iana` 时旧写法 `offsetMinutes`（固定偏移，无夏令时）作为兜底。
+- `days[]`：1 到 7 项，旧的在前，加载时选中**最后一项**。每项有 `date`（`"YYYY-MM-DD"`，当地自然日）、`posts`（紧凑数组，见下，不含纯转推）、`followers`（`current`、`delta`、`baselineAt`、`firstRun`、可选 `segments`）、`status`（`{ tier 0..4, ratio, note }` 或 `null`，当日评级）。
 - `footnotes`：`metricsFetchedAt`、`retweetsExcluded`、`extra[]`。
 
-注意：窗口外或时间无法解析的帖子会被跳过；没有数据的项（没有状态、没有基线、没有名称等）直接隐藏，不显示 0；名称过长会缩小并折成两行，不会截断；头像数据无效时回退为首字母占位；窗口无效时显示明确的错误文字。
+**紧凑帖子行**（每条帖子一个数组）：
+
+```
+[ t, flags, impressions, likes, reposts, replies, quotes, id, snippet ]
+```
+
+| 下标 | 字段 | 含义 |
+| --- | --- | --- |
+| 0 | `t` | unix 秒；或**当天当地 0 点起的秒数**（任何小于 1e8 的数，最短写法）；或 ISO 字符串 |
+| 1 | `flags` | `kind`，如果是回复自己的帖子再加 4；kind：0 发帖，1 回帖，2 引用 |
+| 2–6 | 指标 | 数字，或 `null` = 缺失（绝不估算） |
+| 7 | `id` | 推文 id（纯数字字符串）或 `null`；链接为 `https://x.com/i/status/<id>`（只用数字拼接） |
+| 8 | `snippet` | 浮层里的短文本，约 20 个字符，或 `null`；超过 40 个字符时按字素边界截断 |
+
+帖子不需要完整文本：渲染器只显示片段，缺失也没问题。窗口外或 `t` 无法解析的行会被跳过。旧的对象写法 `{ t, kind, selfThread, text, impressions, likes, reposts, replies, quotes, url }` 和旧 v2 单窗口 DATA（顶层的 `window`、`posts`、`followers`、`status`）仍可渲染，按一天处理。
+
+`status.note` 和 `footnotes.extra[]` 可以是普通字符串或 `{ en, zh }`。`status.note` 里的普通字符串只在页面语言与其匹配时显示（含汉字算中文，其余算英文）；`{ en, zh }` 对象显示当前语言的那一句，缺少该语言就不显示；`extra` 里的普通字符串始终显示。
+
+**体积。** 实测 7 天 × 每天 300 条：unix 时间 + 18 位 id + 20 字符片段为 165 KB；用相对秒数为 154 KB；相对秒数 + 片段、不带 id 为 121 KB；带 id、不带片段为 119 KB；只有相对秒数为 85 KB。渲染器本身约 140 KB，而 Grok Bot 画布整个文件的写入上限曾见约 213 KB，所以每天 300 条的 7 天页面放不下。请让每天只保留重要的帖子（例如互动最高的前 100 条，总数写进 `footnotes.extra`），或减少天数。7 天 × 300 条以及单日 600 条时仍可保持 60 帧。
+
+注意：没有数据的项（没有状态、没有基线、没有名称等）直接隐藏，不显示 0；名称过长会缩小并折行，不会截断；头像数据无效时回退为首字母占位；`tz.iana` 未知、缺少 `tz` 或 `date` 无效时显示明确的错误文字，而不是一个坏掉的表盘。
+
+## 全球使用说明
+
+- **时区。** 日界线和所有显示的时间都由 `tz.iana` 经 `Intl.DateTimeFormat` 得出，所以夏令时（23 小时和 25 小时的日子，表盘按真实长度铺满，刻度落在真实的当地整点；像 America/Sao_Paulo 2018-11-04 这种午夜被跳过的日子，从 01:00 起算）、半小时和 45 分钟偏移（Asia/Kolkata、Asia/Kathmandu、Australia/Lord_Howe）以及极端偏移（+14、−12）都能正确处理。帖子按当地日期归档。填数据的脚本可以用 Python `zoneinfo`：起点是 `datetime(y, m, d, tzinfo=ZoneInfo(iana))`，终点是下一天的当地 0 点。
+- **语言。** 界面语言只有 `en` 和 `zh`。帖子片段按原文显示；过长的按字素截断，emoji 和汉字不会被劈开。
+- **X API 配额。** bot 的 X 访问按用户计量（约每天 1000 次、每分钟 30 次）：每天只取一次用户的帖子（用 `next_token` 翻页），不要轮询，更早几天的紧凑数据存在 bot 自己的记忆里，不再重复获取。
+- **无障碍。** 开启 `prefers-reduced-motion: reduce` 时不会自动播放，表盘震动、结尾闪光、状态扫光和涟漪都会关闭。音乐始终要点击后才开。工具栏按钮都是真正的按钮（可用键盘聚焦），表盘和进度条带有标签，主要数字在深色舞台上用浅色文字（较暗的颜色只用于次要标签）。
 
 ## 头像工具
 
@@ -205,6 +279,13 @@ python3 tools/build_avatar.py ./me.png --size 96 --colors 64
 cd tests && npm install && npm test
 ```
 
-需要 Node 20+、带 Pillow 的 Python 3、Chrome / Chromium（用 `CHROME_PATH` 覆盖默认的 `/usr/bin/google-chrome`）。会对渲染器做严格类型检查，并在无头 Chrome 里渲染约 25 个场景，每个场景还会切换所有音乐风格、拖动、暂停、变速，并离线渲染音乐检查有没有削波或 NaN（示例数据、中英文完整数据、零帖子、单帖子、指标全缺失、首次运行、600 条帖子、超长名称、emoji 名称、坏头像、不安全链接、坏窗口、其他时区等），出现页面错误、网络请求或页面文字里的 `NaN` / `undefined` 都算失败。所有场景数据均为虚构。完整运行约 8 分钟。
+需要 Node 20+、带 Pillow 的 Python 3、Chrome / Chromium（用 `CHROME_PATH` 覆盖默认的 `/usr/bin/google-chrome`）。`npm test` 会生成示例头像、对渲染器做严格类型检查，并在无头 Chrome 里运行四个脚本：
 
-代码注释为英文；页面本身通过 `lang` 支持中英文。
+- `run.mjs`（约 8 分钟）：约 25 个场景（示例数据、中英文完整数据、零 / 一 / 600 条帖子、指标全缺失、首次运行、超长和 emoji 名称、坏头像、不安全链接、坏窗口、其他时区等），每个场景还会切换所有音乐风格、拖动、暂停、变速并离线渲染音乐；出现页面错误、网络请求或页面里的 `NaN` / `undefined` 都算失败。
+- `lang.mjs`：语言初始化（`en`、`zh`、缺失、未知、`zh-CN`）、按钮和 `L` 键切换、页面和画布上没有另一种语言的残留词、备注、`localStorage` 规则（包括被拒绝或损坏的存储）、1:1、9:16、16:9 和 390 px 宽下的布局，截图在 `tests/out/lang/`。
+- `days.mjs`：15 个时区 / 日期的日界线（夏令时 23 / 25 小时、+05:30、+05:45、+14、−12、30 分钟夏令时偏移、被跳过的午夜）、刻度数量、午夜前后和重复小时的当地日归档、三种宽度下的日期按钮与切换、相对时间行、旧数据、错误提示、字素截断，以及 7 天 × 300 条的体积和帧率。
+- `dash.mjs`：中英文、三种画幅下静候 / 繁忙 / 峰值时刻的实时状态、真实播放中的级别变化，以及中心看板截图（`tests/out/dash/`）。
+
+所有场景数据均为虚构。
+
+代码注释为英文；页面本身是中英双语。

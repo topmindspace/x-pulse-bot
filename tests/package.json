@@ -2,11 +2,11 @@
   "name": "x-pulse-tests",
   "private": true,
   "version": "1.0.0",
-  "description": "Headless-Chrome smoke tests for renderer/x-pulse-replay.tsx",
+  "description": "Headless-Chrome tests (smoke, language, days / time zones, live status) for renderer/x-pulse-replay.tsx",
   "scripts": {
     "avatar": "python3 make_sample_avatar.py",
     "typecheck": "mkdir -p src && cp ../renderer/x-pulse-replay.tsx src/replay.tsx && tsc -p .",
-    "test": "npm run avatar && npm run typecheck && node run.mjs"
+    "test": "npm run avatar && npm run typecheck && node run.mjs && node lang.mjs && node days.mjs && node dash.mjs"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",

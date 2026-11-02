@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.0 (2026-11-02)
+
+Breaking DATA change (v2 DATA still renders as one day).
+
+- **Calendar-day replay.** The dial is a local day, 00:00 to 24:00 in the owner's time zone; default is yesterday (title "Yesterday's replay" / 「昨日回放」). `DATA.days[]` holds 1 to 7 days (date, posts, followers, status); account, avatar, tz and footnotes are shared. A compact date chip row switches the day and restarts playback; the last day is selected first.
+- **Worldwide time.** `DATA.tz.iana` with `Intl`: DST days of 23 or 25 hours map to the real length, ticks sit on real local hours, half-hour and 45-minute offsets, +14 / −12, skipped midnights. Posts are bucketed by local day.
+- **Slim data.** Compact post rows `[t, flags, impressions, likes, reposts, replies, quotes, id, snippet]`, `t` may be seconds since local day start, snippets are cut to 40 graphemes, the renderer tolerates missing text.
+- **Bilingual UI.** `EN | 中文` toggle in the toolbar (shortcut `L`), seeded from `DATA.lang` (missing / unknown => en), remembered in `localStorage`; every UI string, tooltip, status note, footnote, axis label, legend and empty / missing state switches live. `status.note` and `footnotes.extra[]` may be `{ en, zh }`.
+- **Centre dashboard redesign.** Engagement is the headline number, followed by the post / reply / quote counts, then impressions and followers, then follower change; layout re-centres when items are hidden; tuned for 1:1, 9:16, 16:9 in both languages.
+- **Live status word** with five levels (Calm / Warming up / Active / On fire / Erupting; 静候 / 升温 / 活跃 / 火热 / 爆发) driven by the intensity of the playhead's last hour, with smoothing, hysteresis and a cross-fade, level pips, a per-level animation of the word and avatar aura, and a faint animated aurora and ripples in the centre disc. The day rating keeps its meaning but now reads Standout / Rising / Steady / Building / Recharge day so words are not repeated.
+- `prefers-reduced-motion`: no autoplay, no shake, finale flash, shimmer or ripples. Music stays off until clicked.
+- Tests: new `lang.mjs`, `days.mjs`, `dash.mjs`; README (EN, then ZH) rewritten with the v3 schema, compact encoding, size numbers, worldwide and accessibility notes.
+
 ## 2.0.0 (2026-11-02)
 
 Visual assessment of 1.0 (real 341-post day and the example data, all three styles): every post used the same three wide, dim, overlapping rings plus a soft disc, so dense hours (about 40 posts per hour) turned into a ring forest with blown-out additive glow, while the biggest posts looked almost like the smallest ones (same ring recipe, a slightly larger radius, no flash). Follower particles in Neuron were plain dots with no arrival feedback.

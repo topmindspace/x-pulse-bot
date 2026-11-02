@@ -2,8 +2,9 @@ import { useEffect, useRef, useState, useGrokTheme, Toggle } from "grok/canvas";
 import type { ChangeEvent, PointerEvent } from "grok/canvas";
 
 // =====================================================================================================
-// X Pulse · 24-hour replay renderer (generic, data-free)
-// Renderer version 2.0.0 (2026-11-02): shockwave hierarchy + generated background music. Bump this line when the renderer changes.
+// X Pulse · daily replay renderer (generic, data-free)
+// Renderer version 3.0.0 (2026-11-02): 1-7 calendar days in the owner's IANA time zone (DST-aware), date chips, slim compact posts,
+// in-page EN / 中文 switch. Bump this line when the renderer changes.
 //
 // This file is a READ-ONLY, NO-NETWORK canvas page. Everything it shows comes from the single DATA object
 // below. A Grok Bot fills DATA from the X API (and its own stored baseline), replaces ONLY the DATA block
@@ -11,64 +12,71 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 // Do not add fetch / XMLHttpRequest / WebSocket / any external URL loading here. Do not touch anything
 // outside the DATA block unless you are changing the renderer itself.
 //
-// DATA schema (see README.md for the full description):
-//   lang        "en" | "zh"                      UI language of the page.
+// DATA schema v3 (see README.md for the full description):
+//   lang        "en" | "zh"                      Initial UI language (the owner's Grok Bot language; missing/unknown => "en"). The viewer can switch EN / 中文 on the page.
 //   example     boolean                          true => placeholder data; the page says so in subtitle and footer.
 //   account     { name, username }               display name and handle (with or without a leading "@").
-//   avatar      { size, palette, indices } | null
-//                 size     pixels per side of the square image (96 recommended)
-//                 palette  base64 of the colour table, 3 bytes (R,G,B) per colour (64 colours recommended)
-//                 indices  base64 of size*size bytes, one palette index per pixel, row-major
-//               null => a letter placeholder is drawn instead (see tools/build_avatar.py to build one).
-//   window      { startISO, endISO, tz }         exactly 24 hours; tz = { label, offsetMinutes } is used only for display.
-//   posts       [{ t, kind, selfThread, text, impressions, likes, reposts, replies, quotes, url }]
-//                 t ISO time; kind "post" | "reply" | "quote"; selfThread true when replying to own post;
-//                 every metric is a number or null (null = missing, never estimate); url = https://x.com/... or null.
-//                 Pure retweets are NOT included.
-//   followers   { current, delta, baselineAt, firstRun, segments? }
-//                 current   follower count now (null if unknown)
-//                 delta     net follower change since the stored baseline (null when there is no baseline)
-//                 baselineAt ISO time of the baseline snapshot (null when none)
-//                 firstRun  true when no baseline existed yet (delta must then be null)
-//                 segments  optional [{ fromISO, toISO, delta }] snapshot intervals used to place follow
-//                           particles on the dial; default = one interval baselineAt -> window end.
-//   status      { tier, ratio, note } | null
-//                 tier 0..4 (0 = on fire, 1 = rising, 2 = steady, 3 = charging up, 4 = resting)
-//                 ratio today / baseline multiple (number or null), note = how it was computed (free text).
+//   avatar      { size, palette, indices } | null   96x96 pixels, see tools/build_avatar.py; null => a letter placeholder.
+//   tz          { iana, label? }                 IANA zone of the owner, e.g. "Asia/Shanghai", "America/New_York", "Asia/Kathmandu".
+//                                                Day boundaries (local 00:00 to the next local 00:00) and every displayed time come from it with
+//                                                Intl, so DST (23 h / 25 h days) and half-hour / 45-minute offsets work. label is only a display name.
+//                                                Fallback without iana: tz.offsetMinutes (fixed offset).
+//   days        1..7 entries, oldest first, the LAST one is selected on load. Each entry:
+//                 date       "YYYY-MM-DD" local calendar day
+//                 posts      compact arrays, one per post (retweets are NOT included):
+//                              [ t, flags, impressions, likes, reposts, replies, quotes, id, snippet ]
+//                                t        unix seconds (number), seconds since the start of that local day (number < 1e8, shortest), or an ISO string
+//                                flags    kind (0 post, 1 reply, 2 quote) + 4 when it is a reply to the owner's own post
+//                                metrics  number or null (null = missing, never estimated)
+//                                id       tweet id string (digits) or null; the link is built as https://x.com/i/status/<id>
+//                                snippet  short text for the hover card (<= ~20 characters) or null; cut to 40 characters (by grapheme) if longer
+//                              Legacy object posts { t, kind, selfThread, text, impressions, likes, reposts, replies, quotes, url } are also accepted.
+//                 followers  { current, delta, baselineAt, firstRun, segments? }
+//                              current   follower count (null if unknown); delta net change since the stored baseline (null when none);
+//                              baselineAt ISO time or null; firstRun true when no baseline existed (delta must then be null);
+//                              segments  optional [{ fromISO, toISO, delta }] snapshot intervals used to place follow particles
+//                 status     { tier, ratio, note } | null    tier 0..4 (0 on fire, 1 rising, 2 steady, 3 charging up, 4 resting),
+//                              ratio = that day / baseline multiple (number or null), note = string OR { en?, zh? } (a plain string is shown only
+//                              while the page language matches it: CJK text => zh, otherwise en)
 //   footnotes   { metricsFetchedAt, retweetsExcluded, extra }
-//                 metricsFetchedAt ISO time or null; retweetsExcluded number or null; extra = string[].
+//                 metricsFetchedAt ISO time or null (also decides which day counts as "Yesterday"); retweetsExcluded number or null;
+//                 extra = (string | { en?, zh? })[] (plain strings are always shown).
+// Legacy v2 DATA (window { startISO, endISO, tz{label, offsetMinutes} }, posts, followers, status at top level) still renders as one day.
 // =====================================================================================================
 
 type Num = number | null;
-type PostKind = "post" | "reply" | "quote";
-interface DataPost {
-  t: string;
-  kind: PostKind;
-  selfThread: boolean;
-  text: string;
-  impressions: Num;
-  likes: Num;
-  reposts: Num;
-  replies: Num;
-  quotes: Num;
-  url: string | null;
+type Note = string | { en?: string; zh?: string };
+type PostIn = (number | string | null)[] | { t: string | number; kind?: string; selfThread?: boolean; text?: string | null; impressions?: Num; likes?: Num; reposts?: Num; replies?: Num; quotes?: Num; url?: string | null };
+interface FolIn {
+  current: Num;
+  delta: Num;
+  baselineAt: string | null;
+  firstRun: boolean;
+  segments?: { fromISO: string; toISO: string; delta: number }[];
+}
+interface StatusIn {
+  tier: number;
+  ratio: Num;
+  note: Note;
+}
+interface TzIn {
+  iana?: string;
+  label?: string;
+  offsetMinutes?: number;
 }
 interface Data {
-  lang: "en" | "zh";
+  lang: string;
   example: boolean;
   account: { name: string; username: string };
   avatar: { size: number; palette: string; indices: string } | null;
-  window: { startISO: string; endISO: string; tz: { label: string; offsetMinutes: number } };
-  posts: DataPost[];
-  followers: {
-    current: Num;
-    delta: Num;
-    baselineAt: string | null;
-    firstRun: boolean;
-    segments?: { fromISO: string; toISO: string; delta: number }[];
-  };
-  status: { tier: number; ratio: Num; note: string } | null;
-  footnotes: { metricsFetchedAt: string | null; retweetsExcluded: Num; extra: string[] };
+  tz?: TzIn;
+  days?: { date: string; posts: PostIn[]; followers: FolIn; status: StatusIn | null }[];
+  footnotes: { metricsFetchedAt: string | null; retweetsExcluded: Num; extra: Note[] };
+  // legacy v2 (single rolling window)
+  window?: { startISO: string; endISO: string; tz?: TzIn };
+  posts?: PostIn[];
+  followers?: FolIn;
+  status?: StatusIn | null;
 }
 
 // ===== BEGIN DATA =====
@@ -79,47 +87,273 @@ const DATA: Data = {
   example: true,
   account: { name: "Example Account", username: "example_user" },
   avatar: null,
-  window: { startISO: "2026-01-01T00:00:00+08:00", endISO: "2026-01-02T00:00:00+08:00", tz: { label: "UTC+8", offsetMinutes: 480 } },
-  posts: [
-    { t: "2026-01-01T08:12:00+08:00", kind: "post", selfThread: false, text: "Example post: good morning, world", impressions: 1200, likes: 14, reposts: 2, replies: 3, quotes: 0, url: null },
-    { t: "2026-01-01T09:40:00+08:00", kind: "reply", selfThread: false, text: "@someone Example reply", impressions: 85, likes: 1, reposts: 0, replies: 0, quotes: 0, url: null },
-    { t: "2026-01-01T12:05:00+08:00", kind: "quote", selfThread: false, text: "Example quote post", impressions: 640, likes: 9, reposts: 1, replies: 1, quotes: 0, url: null },
-    { t: "2026-01-01T12:20:00+08:00", kind: "reply", selfThread: true, text: "Example self-reply continuing a thread", impressions: 210, likes: 3, reposts: 0, replies: 0, quotes: 0, url: null },
-    { t: "2026-01-01T15:30:00+08:00", kind: "post", selfThread: false, text: "Example post with missing metrics", impressions: null, likes: null, reposts: null, replies: null, quotes: null, url: null },
-    { t: "2026-01-01T19:45:00+08:00", kind: "post", selfThread: false, text: "Example evening post", impressions: 3100, likes: 42, reposts: 6, replies: 8, quotes: 2, url: null },
-    { t: "2026-01-01T22:10:00+08:00", kind: "reply", selfThread: false, text: "@someone Example late reply", impressions: 40, likes: 0, reposts: 0, replies: 0, quotes: 0, url: null },
+  tz: { iana: "Asia/Shanghai" },
+  days: [
+    {
+      date: "2026-01-01",
+      posts: [
+        ["2026-01-01T08:12:00+08:00", 0, 1200, 14, 2, 3, 0, null, "Example post: good morning"],
+        ["2026-01-01T09:40:00+08:00", 1, 85, 1, 0, 0, 0, null, "@someone Example reply"],
+        ["2026-01-01T12:05:00+08:00", 2, 640, 9, 1, 1, 0, null, "Example quote post"],
+        ["2026-01-01T12:20:00+08:00", 5, 210, 3, 0, 0, 0, null, "Example self-reply"],
+        ["2026-01-01T15:30:00+08:00", 0, null, null, null, null, null, null, "Example, missing metrics"],
+        ["2026-01-01T19:45:00+08:00", 0, 3100, 42, 6, 8, 2, null, "Example evening post"],
+        ["2026-01-01T22:10:00+08:00", 1, 40, 0, 0, 0, 0, null, "@someone Example late reply"],
+      ],
+      followers: { current: 1000, delta: null, baselineAt: null, firstRun: true },
+      status: null,
+    },
   ],
-  followers: { current: 1000, delta: null, baselineAt: null, firstRun: true },
-  status: null,
   footnotes: { metricsFetchedAt: null, retweetsExcluded: null, extra: [] },
 };
 // ===== END DATA =====
 
 // ---------- everything below is the renderer; it only reads DATA ----------
-const EN = DATA.lang !== "zh";
-function tx(zh: string, en: string): string {
-  return EN ? en : zh;
+type Lang = "en" | "zh";
+// Language is React state in <Replay>; LANG mirrors it for the module-level helpers and the canvas drawing code (set at the top of every render, read at call time).
+function normLang(x: unknown): Lang {
+  return typeof x === "string" && x.toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
 }
-const DAY = 86400;
-const START_S = Math.floor(Date.parse(DATA.window.startISO) / 1000);
-const TZ_S = Math.round(DATA.window.tz.offsetMinutes * 60);
-const BAD_DATA: string | null =
-  Number.isNaN(START_S) || !Number.isFinite(TZ_S) ? "DATA.window.startISO / DATA.window.tz.offsetMinutes is invalid" : null;
+const LANG0: Lang = normLang(DATA.lang);
+let LANG: Lang = LANG0;
+function tx(zh: string, en: string): string {
+  return LANG === "zh" ? zh : en;
+}
+// A bot-written note: { en, zh } picks the current language; a plain string counts as zh if it contains CJK characters, otherwise en, and is shown only in its own language
+function pickNote(n: unknown): string {
+  if (typeof n === "string") return /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(n) === (LANG === "zh") ? n : "";
+  if (n !== null && typeof n === "object") {
+    const v = (n as { en?: unknown; zh?: unknown })[LANG];
+    return typeof v === "string" ? v : "";
+  }
+  return "";
+}
+const LANG_KEY = "xpulse.lang";
+// The viewer's last choice is remembered only while DATA.lang is unchanged (so a changed Grok Bot language wins); every storage failure is ignored (sandboxed pages)
+function initialLang(): Lang {
+  try {
+    const raw = window.localStorage.getItem(LANG_KEY);
+    if (raw !== null) {
+      const o = JSON.parse(raw) as { lang?: unknown; base?: unknown };
+      if (o.base === LANG0 && (o.lang === "en" || o.lang === "zh")) return o.lang;
+    }
+  } catch {
+    // no storage or bad value: use DATA.lang
+  }
+  return LANG0;
+}
+function saveLang(l: Lang): void {
+  try {
+    window.localStorage.setItem(LANG_KEY, JSON.stringify({ lang: l, base: LANG0 }));
+  } catch {
+    // storage not available
+  }
+}
+// prefers-reduced-motion: no autoplay, no dial shake, no end-of-day flash (the viewer can still press Play)
+const REDUCED: boolean = (() => {
+  try {
+    return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+})();
+const KIND_OF: Record<string, number> = { post: 0, reply: 1, quote: 2 };
+const kindName = (i: number): string => [tx("发帖", "Posts"), tx("回复", "Replies"), tx("引用", "Quotes")][i];
+const SAFE_URL = /^https:\/\/(x|twitter)\.com\//;
 const NAME = DATA.account.name.trim();
 const USERNAME = DATA.account.username.trim().replace(/^@+/, "");
 const HANDLE = USERNAME === "" ? "" : "@" + USERNAME;
-const KIND_OF: Record<string, number> = { post: 0, reply: 1, quote: 2 };
-const KIND_NAME = [tx("发帖", "Posts"), tx("回复", "Replies"), tx("引用", "Quotes")];
-const SAFE_URL = /^https:\/\/(x|twitter)\.com\//;
+const MAX_DAYS = 7;
+const SNIP = 40;
 
-const FOL = DATA.followers;
-const HAS_FOL = FOL.delta !== null && Number.isFinite(FOL.delta);
-const FOLLOW_DELTA = HAS_FOL ? Math.round(FOL.delta as number) : 0;
-const FOLLOW_NOW: Num = FOL.current !== null && Number.isFinite(FOL.current) ? FOL.current : null;
-const STATUS = DATA.status;
-const HAS_STATUS = STATUS !== null;
-const TIER = STATUS === null || !Number.isFinite(STATUS.tier) ? 2 : Math.max(0, Math.min(4, Math.round(STATUS.tier)));
-const TIER_RULE = tx("≥1.5 火热 · 1.0–1.5 上扬 · 0.7–1.0 在线 · 0.4–0.7 蓄力 · <0.4 充电", "≥1.5 on fire · 1.0–1.5 rising · 0.7–1.0 steady · 0.4–0.7 charging · <0.4 resting");
+// ---------- time zone: everything goes through Intl, so DST and odd offsets (+05:30, +05:45, Lord Howe 30-min DST) just work ----------
+interface LP {
+  y: number;
+  mo: number;
+  d: number;
+  h: number;
+  mi: number;
+  s: number;
+}
+const TZ_IN: TzIn = (DATA.tz ?? (DATA.window ? DATA.window.tz : undefined) ?? {}) as TzIn;
+let TZ_ERR: string | null = null;
+let TZ_FMT: Intl.DateTimeFormat | null = null;
+let TZ_FIXED = 0; // seconds, used only when there is no iana
+if (typeof TZ_IN.iana === "string" && TZ_IN.iana !== "") {
+  try {
+    TZ_FMT = new Intl.DateTimeFormat("en-US", { timeZone: TZ_IN.iana, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" } as Intl.DateTimeFormatOptions);
+  } catch {
+    TZ_ERR = "DATA.tz.iana “" + TZ_IN.iana + "” is not a known time zone";
+  }
+} else if (typeof TZ_IN.offsetMinutes === "number" && Number.isFinite(TZ_IN.offsetMinutes)) {
+  TZ_FIXED = Math.round(TZ_IN.offsetMinutes * 60);
+} else {
+  TZ_ERR = "DATA.tz.iana is missing (for example \"Asia/Shanghai\")";
+}
+const TZ_LABEL: string = typeof TZ_IN.label === "string" && TZ_IN.label !== "" ? TZ_IN.label : TZ_FMT !== null ? (TZ_IN.iana as string) : "UTC" + (TZ_FIXED < 0 ? "−" : "+") + pad2(Math.floor(Math.abs(TZ_FIXED) / 3600)) + ":" + pad2(Math.round((Math.abs(TZ_FIXED) % 3600) / 60));
+// Local wall-clock parts of a unix instant in the owner's zone
+function lparts(utcS: number): LP {
+  const sec = Math.floor(utcS);
+  if (TZ_FMT === null) {
+    const d = new Date((sec + TZ_FIXED) * 1000);
+    return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes(), s: d.getUTCSeconds() };
+  }
+  const o: Record<string, number> = {};
+  for (const p of TZ_FMT.formatToParts(new Date(sec * 1000))) if (p.type !== "literal") o[p.type] = parseInt(p.value, 10);
+  return { y: o.year, mo: o.month, d: o.day, h: (o.hour || 0) % 24, mi: o.minute || 0, s: o.second || 0 };
+}
+const dkey = (p: { y: number; mo: number; d: number }): number => p.y * 10000 + p.mo * 100 + p.d;
+// First instant whose local date is >= the given calendar day (handles a skipped or repeated local midnight)
+function localDayStart(y: number, mo: number, d: number): number {
+  const guess = Date.UTC(y, mo - 1, d) / 1000;
+  if (TZ_FMT === null) return guess - TZ_FIXED;
+  const target = y * 10000 + mo * 100 + d;
+  const step = 900;
+  for (let t = guess - 15 * 3600; t <= guess + 14 * 3600; t += step) {
+    if (dkey(lparts(t)) >= target) {
+      for (let b = t - step + 60; b < t; b += 60) if (dkey(lparts(b)) >= target) return b;
+      return t;
+    }
+  }
+  return guess;
+}
+function parseDay(s: unknown): [number, number, number] | null {
+  const m = typeof s === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(s) : null;
+  if (m === null) return null;
+  const y = +m[1];
+  const mo = +m[2];
+  const d = +m[3];
+  const c = new Date(Date.UTC(y, mo - 1, d));
+  return c.getUTCFullYear() === y && c.getUTCMonth() === mo - 1 && c.getUTCDate() === d ? [y, mo, d] : null;
+}
+function nextDay(a: [number, number, number]): [number, number, number] {
+  const c = new Date(Date.UTC(a[0], a[1] - 1, a[2] + 1));
+  return [c.getUTCFullYear(), c.getUTCMonth() + 1, c.getUTCDate()];
+}
+const dstr = (a: [number, number, number]): string => a[0] + "-" + pad2(a[1]) + "-" + pad2(a[2]);
+
+// ---------- input normalisation ----------
+interface PostN {
+  s: number; // unix seconds
+  kind: number;
+  self: boolean;
+  text: string;
+  v: Num;
+  l: Num;
+  r: Num;
+  c: Num;
+  q: Num;
+  url: string | null;
+}
+interface DayM {
+  date: string;
+  ymd: [number, number, number];
+  startS: number;
+  len: number;
+  posts: PostN[];
+  fol: FolIn;
+  status: StatusIn | null;
+}
+const num = (x: unknown): Num => (typeof x === "number" && Number.isFinite(x) ? x : null);
+// Cut to n user-perceived characters (grapheme clusters when Intl.Segmenter exists, code points otherwise) so emoji and combining marks are never split
+function clip(s: string, n: number): string {
+  const Seg = (Intl as unknown as { Segmenter?: new (l?: string, o?: { granularity: string }) => { segment: (x: string) => Iterable<{ segment: string }> } }).Segmenter;
+  const parts: string[] = [];
+  if (Seg) {
+    try {
+      for (const g of new Seg(undefined, { granularity: "grapheme" }).segment(s)) parts.push(g.segment);
+    } catch {
+      parts.length = 0;
+    }
+  }
+  const a = parts.length > 0 ? parts : Array.from(s);
+  return a.length > n ? a.slice(0, n - 1).join("") + "…" : s;
+}
+function timeOf(t: unknown): number {
+  if (typeof t === "number") return Number.isFinite(t) ? (t > 1e11 ? t / 1000 : t) : NaN;
+  return typeof t === "string" ? Date.parse(t) / 1000 : NaN;
+}
+function normPost(raw: PostIn): PostN | null {
+  if (raw === null || typeof raw !== "object") return null;
+  if (Array.isArray(raw)) {
+    const s = timeOf(raw[0]);
+    if (!Number.isFinite(s)) return null;
+    const fl = typeof raw[1] === "number" ? raw[1] : 0;
+    const id = typeof raw[7] === "string" && /^\d{1,25}$/.test(raw[7]) ? raw[7] : null;
+    return { s, kind: Math.min(2, fl & 3), self: (fl & 4) !== 0, text: typeof raw[8] === "string" ? clip(raw[8], SNIP) : "", v: num(raw[2]), l: num(raw[3]), r: num(raw[4]), c: num(raw[5]), q: num(raw[6]), url: id === null ? null : "https://x.com/i/status/" + id };
+  }
+  const s = timeOf(raw.t);
+  if (!Number.isFinite(s)) return null;
+  const txt = typeof raw.text === "string" ? raw.text : "";
+  return { s, kind: KIND_OF[raw.kind ?? "post"] ?? 0, self: raw.selfThread === true, text: clip(txt, SNIP), v: num(raw.impressions), l: num(raw.likes), r: num(raw.reposts), c: num(raw.replies), q: num(raw.quotes), url: typeof raw.url === "string" && SAFE_URL.test(raw.url) ? raw.url : null };
+}
+function normFol(f: FolIn | undefined): FolIn {
+  return f && typeof f === "object" ? f : { current: null, delta: null, baselineAt: null, firstRun: false };
+}
+function buildDays(): DayM[] {
+  const out: DayM[] = [];
+  if (TZ_ERR !== null) return out;
+  const posts = (arr: PostIn[] | undefined, a: number, b: number): PostN[] => {
+    const r: PostN[] = [];
+    for (const p of Array.isArray(arr) ? arr : []) {
+      // a numeric t below 1e8 is "seconds since the start of this local day" (shorter than a unix time)
+      const n = normPost(Array.isArray(p) && typeof p[0] === "number" && p[0] < 1e8 ? [p[0] + a, ...p.slice(1)] : p);
+      if (n !== null && n.s >= a && n.s <= b) r.push(n);
+    }
+    return r;
+  };
+  if (Array.isArray(DATA.days) && DATA.days.length > 0) {
+    for (const d of DATA.days.slice(-MAX_DAYS)) {
+      const ymd = parseDay(d.date);
+      if (ymd === null) continue;
+      const startS = localDayStart(ymd[0], ymd[1], ymd[2]);
+      const nx = nextDay(ymd);
+      const len = localDayStart(nx[0], nx[1], nx[2]) - startS;
+      if (!(len > 3600 * 12 && len < 3600 * 36)) continue;
+      out.push({ date: dstr(ymd), ymd, startS, len, posts: posts(d.posts, startS, startS + len), fol: normFol(d.followers), status: d.status ?? null });
+    }
+  } else if (DATA.window) {
+    const startS = Date.parse(DATA.window.startISO) / 1000;
+    if (Number.isFinite(startS)) {
+      const lp = lparts(startS);
+      const ymd: [number, number, number] = [lp.y, lp.mo, lp.d];
+      out.push({ date: dstr(ymd), ymd, startS, len: 86400, posts: posts(DATA.posts, startS, startS + 86400), fol: normFol(DATA.followers), status: DATA.status ?? null });
+    }
+  }
+  return out;
+}
+const DAYS: DayM[] = buildDays();
+const BAD_DATA: string | null = TZ_ERR !== null ? TZ_ERR : DAYS.length === 0 ? "DATA.days is empty or has no valid date (use \"YYYY-MM-DD\")" : null;
+// "Yesterday" = the local day before the day the metrics were fetched
+const ASOF = typeof DATA.footnotes.metricsFetchedAt === "string" && BAD_DATA === null ? Date.parse(DATA.footnotes.metricsFetchedAt) / 1000 : NaN;
+const ASOF_KEY = Number.isFinite(ASOF) ? dkey(lparts(ASOF)) : -1;
+const isYesterday = (d: DayM): boolean => {
+  const nx = nextDay(d.ymd);
+  return ASOF_KEY > 0 && nx[0] * 10000 + nx[1] * 100 + nx[2] === ASOF_KEY;
+};
+
+// ---------- the selected day (selectDay() at the bottom of the file fills these; the drawing code reads them at call time) ----------
+let CUR_DAY = -1;
+let DAY = 86400; // real length of the selected day in seconds (82800 / 90000 on DST days): one hand turn
+let START_S = 0;
+let FOL: FolIn = { current: null, delta: null, baselineAt: null, firstRun: false };
+let HAS_FOL = false;
+let FOLLOW_DELTA = 0;
+let FOLLOW_NOW: Num = null;
+let STATUS: StatusIn | null = null;
+let HAS_STATUS = false;
+let TIER = 2;
+const tierRule = (): string => tx("≥1.5 高光 · 1.0–1.5 上扬 · 0.7–1.0 稳定 · 0.4–0.7 蓄力 · <0.4 充电", "≥1.5 standout · 1.0–1.5 rising · 0.7–1.0 steady · 0.4–0.7 building · <0.4 recharge");
+// Word for "that day" in labels: Yesterday when the selected day is yesterday, otherwise a neutral word
+let IS_YDAY = false;
+const wday = (a: [number, number, number]): string => {
+  try {
+    return new Intl.DateTimeFormat(LANG === "zh" ? "zh-CN" : "en-US", { weekday: "short", timeZone: "UTC" }).format(new Date(Date.UTC(a[0], a[1] - 1, a[2], 12)));
+  } catch {
+    return "";
+  }
+};
+const dayWord = (): string => (IS_YDAY ? tx("昨日", "Yesterday") : tx("当日", "That day"));
 
 const COLS: number[][] = [
   [255, 183, 3],
@@ -134,12 +368,25 @@ interface Tier {
   rgb: number[];
 }
 const TIERS: Tier[] = [
-  { name: tx("状态火热", "On fire"), line: tx("火力全开，今天很燃", "Full power, today burns bright"), rgb: [255, 170, 70] },
-  { name: tx("势头上扬", "Rising"), line: tx("光环正在升起", "The glow is rising"), rgb: [255, 214, 102] },
-  { name: tx("稳稳在线", "Steady"), line: tx("心跳平稳，节奏在线", "Steady heartbeat, right on rhythm"), rgb: [255, 120, 150] },
-  { name: tx("蓄力中", "Charging up"), line: tx("蓄力日，明天放大招", "A charging day, big moves ahead"), rgb: [124, 224, 150] },
-  { name: tx("静心充电", "Recharging"), line: tx("好戏在后面", "The best is yet to come"), rgb: [150, 175, 255] },
+  { get name() { return tx("高光日", "Standout day"); }, get line() { return tx("全天火力全开", "Full power all day"); }, rgb: [255, 170, 70] },
+  { get name() { return tx("上扬日", "Rising day"); }, get line() { return tx("光环正在升起", "The glow is rising"); }, rgb: [255, 214, 102] },
+  { get name() { return tx("稳定日", "Steady day"); }, get line() { return tx("心跳平稳，节奏在线", "Steady heartbeat, right on rhythm"); }, rgb: [255, 120, 150] },
+  { get name() { return tx("蓄力日", "Building day"); }, get line() { return tx("积蓄能量，好戏在后面", "Gathering energy, the best is yet to come"); }, rgb: [124, 224, 150] },
+  { get name() { return tx("充电日", "Recharge day"); }, get line() { return tx("静心充电，下次更精彩", "Recharging for a stronger next time"); }, rgb: [150, 175, 255] },
 ];
+// Live status: how intense the playhead's last hour is. Every post adds a weight (1..3: its engagement and impressions relative to this day's
+// median) that decays with a 20-minute time constant (about one hour of memory). The five levels are cut at quantiles of this day's own
+// timeline with absolute floors (a sparse day never "erupts"); the shown level moves with smoothing, hysteresis and a minimum dwell time.
+const LIVE_RGB: number[][] = [[150, 175, 255], [124, 224, 150], [255, 214, 102], [255, 150, 70], [255, 92, 110]];
+const liveNames = (): string[] => [tx("静候", "Calm"), tx("升温", "Warming up"), tx("活跃", "Active"), tx("火热", "On fire"), tx("爆发", "Erupting")];
+const LIVE_TAU = 1200;
+const LIVE_WIN = 3600;
+const LIVE_ABS = [0.15, 0.6, 1.5, 3];
+const LIVE_Q = [0.4, 0.65, 0.85, 0.95];
+let LIVE_T: number[] = LIVE_ABS.slice();
+let NODE_P: number[] = [];
+const LIVE: { raw: number; sm: number; lvl: number; k: number; t: number; cur: number; at: number; prev: number; init: boolean } = { raw: 0, sm: 0, lvl: 0, k: 0, t: 0, cur: 0, at: -1e9, prev: 0, init: false };
+
 interface DrawOpts {
   tier: number;
   showFollow: boolean;
@@ -163,15 +410,16 @@ interface Vis {
   time: boolean;
   foot: boolean;
 }
-// Items missing from the data (no status, no follower baseline, no follower count, no name) default to off and are hidden from the toggle panel
-const VIS_ALL: Vis = { avatar: true, status: HAS_STATUS, posts: true, handle: HANDLE !== "", name: NAME !== "", follow: HAS_FOL, fans: FOLLOW_NOW !== null, imp: true, eng: true, text: true, legend: true, time: true, foot: true };
+// Items missing from the selected day's data (no status, no follower baseline, no follower count, no name, no post text) are switched off and hidden from the toggle panel
+const VIS_TRUE: Vis = { avatar: true, status: true, posts: true, handle: true, name: true, follow: true, fans: true, imp: true, eng: true, text: true, legend: true, time: true, foot: true };
+let AVAIL: Vis = VIS_TRUE;
+let VIS_TOTAL = 0;
 const VIS_NONE: Vis = { avatar: false, status: false, posts: false, handle: false, name: false, follow: false, fans: false, imp: false, eng: false, text: false, legend: false, time: false, foot: false };
-const VIS_TOTAL = Object.values(VIS_ALL).filter((x) => x).length;
-const VIS_GROUPS: { title: string; items: [keyof Vis, string][] }[] = [
+const visGroups = (): { title: string; items: [keyof Vis, string][] }[] => [
   { title: tx("身份", "Identity"), items: [["avatar", tx("头像", "Avatar")], ["name", tx("账号名「" + NAME + "」", "Name “" + NAME + "”")], ["handle", tx("用户名 ", "Handle ") + HANDLE]] },
-  { title: tx("核心指标", "Metrics"), items: [["follow", tx("关注变化", "Follower change")], ["fans", tx("粉丝数", "Followers")], ["imp", tx("曝光数", "Impressions")], ["eng", tx("互动数", "Engagement")], ["posts", tx("发帖/回复/引用条数", "Posts / replies / quotes")], ["status", tx("今日状态", "Today's status")]] },
+  { title: tx("核心指标", "Metrics"), items: [["follow", tx("关注变化", "Follower change")], ["fans", tx("粉丝数", "Followers")], ["imp", tx("曝光数", "Impressions")], ["eng", tx("互动数", "Engagement")], ["posts", tx("发帖/回复/引用条数", "Posts / replies / quotes")], ["status", tx("实时状态与当日评级", "Live status and day rating")]] },
   { title: tx("画面元素", "Elements"), items: [["text", tx("帖子文字", "Post text")], ["legend", tx("图例", "Legend")], ["time", tx("时间刻度与当前时间", "Time ticks and clock")], ["foot", tx("脚注", "Footnotes")]] },
-].map((g) => ({ title: g.title, items: g.items.filter((it) => VIS_ALL[it[0] as keyof Vis]) as [keyof Vis, string][] }));
+].map((g) => ({ title: g.title, items: g.items.filter((it) => AVAIL[it[0] as keyof Vis]) as [keyof Vis, string][] }));
 
 interface NodeT {
   idx: number;
@@ -206,38 +454,38 @@ function iso2s(iso: string): number {
 }
 
 function buildNodes(): NodeT[] {
-  const rows: { s: number; p: DataPost }[] = [];
-  for (const p of DATA.posts) {
-    const s = iso2s(p.t);
-    if (Number.isFinite(s) && s >= 0 && s <= DAY) rows.push({ s, p });
+  const rows: { s: number; p: PostN }[] = [];
+  for (const p of DAYS[CUR_DAY].posts) {
+    const s = p.s - START_S;
+    if (s >= 0 && s <= DAY) rows.push({ s, p });
   }
   rows.sort((a, b) => a.s - b.s);
-  const eng = (p: DataPost): number => (p.likes ?? 0) + (p.reposts ?? 0) + (p.replies ?? 0);
+  const eng = (p: PostN): number => (p.l ?? 0) + (p.r ?? 0) + (p.c ?? 0);
   let maxEng = 1;
   let maxV = 1;
   for (const w of rows) {
     if (eng(w.p) > maxEng) maxEng = eng(w.p);
-    if ((w.p.impressions ?? 0) > maxV) maxV = w.p.impressions ?? 0;
+    if ((w.p.v ?? 0) > maxV) maxV = w.p.v ?? 0;
   }
   const out = rows.map((w, i): NodeT => {
     const p = w.p;
     const lane = (i * 5) % 7;
     return {
       idx: i,
-      url: p.url !== null && SAFE_URL.test(p.url) ? p.url : null,
+      url: p.url,
       ts: w.s,
-      kind: KIND_OF[p.kind] ?? 0,
-      self: p.selfThread === true,
-      text: p.text.length > 140 ? p.text.slice(0, 139) + "…" : p.text,
-      v: p.impressions,
-      l: p.likes,
-      r: p.reposts,
-      c: p.replies,
-      q: p.quotes,
+      kind: p.kind,
+      self: p.self,
+      text: p.text,
+      v: p.v,
+      l: p.l,
+      r: p.r,
+      c: p.c,
+      q: p.q,
       ang: (w.s / DAY) * Math.PI * 2 - Math.PI / 2,
       lr: 0.52 + 0.052 * lane + (((i * 37) % 11) / 11) * 0.02,
       bright: Math.log(1 + eng(p)) / Math.log(1 + maxEng),
-      rip: p.impressions === null ? 0 : Math.log10(p.impressions + 1) / Math.log10(maxV + 1),
+      rip: p.v === null ? 0 : Math.log10(p.v + 1) / Math.log10(maxV + 1),
       tier: 0,
     };
   });
@@ -291,37 +539,39 @@ function buildParts(): PartT[] {
   return out;
 }
 
-const NODES: NodeT[] = buildNodes();
-const PARTS: PartT[] = buildParts();
+let NODES: NodeT[] = [];
+let PARTS: PartT[] = [];
 const COUNT_BY_KIND: number[] = [0, 0, 0];
 let SELF_N = 0;
 let MISSING_N = 0;
 let HAS_IMP = false;
 let HAS_ENG = false;
-for (const n of NODES) {
-  COUNT_BY_KIND[n.kind] += 1;
-  if (n.self) SELF_N += 1;
-  if (n.v === null || n.l === null || n.r === null || n.c === null || n.q === null) MISSING_N += 1;
-  if (n.v !== null) HAS_IMP = true;
-  if (n.l !== null || n.r !== null || n.c !== null || n.q !== null) HAS_ENG = true;
+let ANY_TEXT = false;
+interface Tick {
+  a: number;
+  major: boolean;
+  label: string;
 }
+let TICKS: Tick[] = [];
 
 function pad2(n: number): string {
   return n < 10 ? "0" + n : String(n);
 }
-// Seconds into the window -> MM-DD HH:mm(:ss) in the account's time zone
+// Seconds into the selected day -> MM-DD HH:mm(:ss) in the owner's time zone (the end of the day reads 24:00 of the same date)
 function tzDT(off: number, withSec: boolean): string {
-  const d = new Date((START_S + off + TZ_S) * 1000);
-  const base = pad2(d.getUTCMonth() + 1) + "-" + pad2(d.getUTCDate()) + " " + pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes());
-  return withSec ? base + ":" + pad2(d.getUTCSeconds()) : base;
+  if (off >= DAY && !withSec) return pad2(DAYS[CUR_DAY].ymd[1]) + "-" + pad2(DAYS[CUR_DAY].ymd[2]) + " 24:00";
+  const d = lparts(START_S + off);
+  const base = pad2(d.mo) + "-" + pad2(d.d) + " " + pad2(d.h) + ":" + pad2(d.mi);
+  return withSec ? base + ":" + pad2(d.s) : base;
 }
 function tzHM(off: number): string {
-  const d = new Date((START_S + off + TZ_S) * 1000);
-  return pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes());
+  if (off >= DAY) return "24:00";
+  const d = lparts(START_S + off);
+  return pad2(d.h) + ":" + pad2(d.mi);
 }
 function fmtIso(iso: string): string {
   const s = iso2s(iso);
-  return Number.isFinite(s) ? tzDT(s, false) + " " + DATA.window.tz.label : iso;
+  return Number.isFinite(s) ? tzDT(s, false) + " " + TZ_LABEL : iso;
 }
 function rgba(c: number[], a: number): string {
   return "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a.toFixed(3) + ")";
@@ -347,7 +597,7 @@ const TAU2 = Math.PI * 2;
 const NEON_CY = [0, 245, 255];
 const NEON_PK = [255, 46, 196];
 const SWEEP_RGB: number[][] = [[150, 200, 255], [255, 214, 150], [255, 46, 196]];
-const STYLE_NAMES = [tx("神经元", "Neuron"), tx("星系", "Galaxy"), tx("霓虹声波", "Neon wave")];
+const styleNames = (): string[] => [tx("神经元", "Neuron"), tx("星系", "Galaxy"), tx("霓虹声波", "Neon wave")];
 const KCOLS: number[][][] = [
   COLS,
   [[255, 205, 110], [130, 210, 255], [255, 120, 190]],
@@ -387,9 +637,9 @@ function glowAt(ctx: CanvasRenderingContext2D, c: number[], x: number, y: number
 
 function drawTicks(x: CanvasRenderingContext2D, S: number, c: number[], showTime: boolean, font: string): void {
   const g = geo(S);
-  for (let h = 0; h < 24; h++) {
-    const a = (h / 24) * TAU2 - Math.PI / 2;
-    const major = h % 3 === 0;
+  for (const tk of TICKS) {
+    const a = tk.a;
+    const major = tk.major;
     const len = (major ? 10 : 4) * g.sc;
     x.strokeStyle = rgba(c, major ? 0.7 : 0.28);
     x.lineWidth = 1;
@@ -403,7 +653,7 @@ function drawTicks(x: CanvasRenderingContext2D, S: number, c: number[], showTime
       x.textAlign = "center";
       x.textBaseline = "middle";
       const lr = g.rim + g.margin * 0.55;
-      x.fillText(tzHM(h * 3600), g.cx + Math.cos(a) * lr, g.cx + Math.sin(a) * lr);
+      x.fillText(tk.label, g.cx + Math.cos(a) * lr, g.cx + Math.sin(a) * lr);
     }
   }
 }
@@ -412,7 +662,7 @@ function drawTicks(x: CanvasRenderingContext2D, S: number, c: number[], showTime
 const BG = new Map<string, HTMLCanvasElement>();
 function bgLayer(style: number, S: number, showTime: boolean, font: string): HTMLCanvasElement | null {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const key = style + "|" + S + "|" + dpr + "|" + (showTime ? 1 : 0);
+  const key = style + "|" + S + "|" + dpr + "|" + (showTime ? 1 : 0) + "|" + CUR_DAY;
   const had = BG.get(key);
   if (had) return had;
   if (BG.size > 9) BG.clear();
@@ -437,8 +687,8 @@ function bgLayer(style: number, S: number, showTime: boolean, font: string): HTM
   if (style === 0) {
     x.strokeStyle = "rgba(150,190,250,0.04)";
     x.lineWidth = 1;
-    for (let h = 0; h < 24; h++) {
-      const a = (h / 24) * TAU2 - Math.PI / 2;
+    for (const tk of TICKS) {
+      const a = tk.a;
       x.beginPath();
       x.moveTo(cx + Math.cos(a) * g.rim * 0.45, cx + Math.sin(a) * g.rim * 0.45);
       x.lineTo(cx + Math.cos(a) * g.rim, cx + Math.sin(a) * g.rim);
@@ -584,10 +834,11 @@ function handLabel(ctx: CanvasRenderingContext2D, S: number, ah: number, cur: nu
 // Shockwave life in seconds of dial time (24 h = 30 s of playback at 1x, so 11000 s is about 3.8 s of playback)
 const LIFE = [3200, 8000, 11000];
 const WHITE = [255, 248, 235];
-const BIG_IDX: number[] = NODES.filter((n) => n.tier > 0).map((n) => n.idx);
+let BIG_IDX: number[] = [];
 
 // Dial shake and pulse for the major shockwaves: a few pixels, decays within a fraction of a second
 function shakeOf(cur: number, sc: number): [number, number, number] {
+  if (REDUCED) return [0, 0, 1];
   let dx = 0;
   let dy = 0;
   let k = 1;
@@ -953,8 +1204,8 @@ function decor(ctx: CanvasRenderingContext2D, st: number, ax: number, ay: number
 }
 
 // ---------- Core board: avatar + name + today's status + rolling metrics ----------
-const FOL0 = FOLLOW_DELTA - PARTS.length; // follows that happened before the window start (prorated from the snapshot interval)
-const ROLL = { imp: 0, eng: 0, fol: FOL0, t: 0 };
+let FOL0 = 0; // follows that happened before the day start (prorated from the snapshot interval)
+let ROLL = { imp: 0, eng: 0, fol: 0, t: 0 };
 const TINT: number[][] = [[70, 120, 210], [160, 96, 210], [230, 40, 170]];
 const RING: number[][] = [[150, 205, 255], [255, 214, 150], NEON_CY];
 let AV_W = 0;
@@ -1068,13 +1319,13 @@ function pieceRow(ctx: CanvasRenderingContext2D, ps: { t: string; c: string }[],
   }
 }
 // Today's status: small motion around the avatar (one per tier)
-function statusAura(ctx: CanvasRenderingContext2D, ax: number, ay: number, ra: number, tier: number, now: number, sc: number): void {
-  const tc = TIERS[tier].rgb;
+// (variant: 0 fire, 1 rising rings, 2 heartbeat, 3 petals, 4 twinkle; k scales how much is drawn)
+function statusAura(ctx: CanvasRenderingContext2D, ax: number, ay: number, ra: number, tier: number, tc: number[], k: number, now: number, sc: number): void {
   const br = 0.5 + 0.5 * Math.sin(now / 900);
   ctx.globalCompositeOperation = "lighter";
   if (tier === 0) {
-    glowAt(ctx, [255, 140, 40], ax, ay, ra * (1.9 + 0.2 * br), 0.4);
-    for (let i = 0; i < 16; i++) {
+    glowAt(ctx, tc, ax, ay, ra * (1.9 + 0.2 * br), 0.4 * k);
+    for (let i = 0; i < Math.round(16 * k); i++) {
       const per = 1500 + (i % 5) * 240;
       const ph = ((now + i * 397) % per) / per;
       const a = frac(Math.sin(i * 12.9898) * 43758.5453) * TAU2;
@@ -1130,6 +1381,104 @@ function statusAura(ctx: CanvasRenderingContext2D, ax: number, ay: number, ra: n
   ctx.globalCompositeOperation = "source-over";
 }
 
+// Centre background: slow aurora blobs and faint inner ripples, strength follows the live level (kept very low so the numbers stay readable)
+function liveBg(ctx: CanvasRenderingContext2D, cx: number, zr: number, lvl: number, k: number, now: number): void {
+  const t = REDUCED ? 0 : now;
+  const c1 = LIVE_RGB[lvl];
+  const c2 = LIVE_RGB[Math.min(4, lvl + 1)];
+  const amp = (REDUCED ? 0.5 : 1) * (0.06 + 0.16 * k) * (0.85 + 0.15 * Math.sin(t / (3000 - lvl * 380)));
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cx, zr - 0.6, 0, TAU2);
+  ctx.clip();
+  ctx.globalCompositeOperation = "lighter";
+  const sp = 11000 - lvl * 1500;
+  for (let i = 0; i < 3; i++) {
+    const ph = t / sp + i * 2.1;
+    glowAt(ctx, i === 1 ? c2 : c1, cx + Math.cos(ph + i) * zr * 0.4, cx + Math.sin(ph * 0.8 + i * 1.7) * zr * 0.3 - zr * 0.1, zr * (0.8 + 0.12 * i), amp * (i === 0 ? 1 : 0.7));
+  }
+  if (lvl >= 1 && !REDUCED) {
+    const per = 4600 - lvl * 700;
+    for (let i = 0; i < 2; i++) {
+      const f = (t / per + i / 2) % 1;
+      ctx.strokeStyle = rgba(c1, amp * 1.2 * (1 - f));
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(cx, cx - zr * 0.08, zr * (0.25 + 0.75 * f), 0, TAU2);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+// The live status word: the stronger the level, the stronger the glow pulse, the shimmer sweep and the beat
+function liveWord(ctx: CanvasRenderingContext2D, txt: string, x: number, y: number, size: number, maxW: number, lvl: number, now: number, st: number, font: string, alpha: number): void {
+  if (alpha <= 0.01) return;
+  const t = REDUCED ? 0 : now;
+  const c = LIVE_RGB[lvl];
+  const per = [4200, 2800, 1900, 1200, 800][lvl];
+  const beat = 0.5 + 0.5 * Math.sin((t / per) * TAU2);
+  const wt = st === 1 ? "400 " : "700 ";
+  ctx.font = wt + size + "px " + font;
+  const w0 = ctx.measureText(txt).width;
+  const fit = Math.min(1, maxW / Math.max(1, w0));
+  const sx = fit * (1 + (lvl >= 3 ? 0.012 * (lvl - 2) * beat : 0));
+  ctx.save();
+  ctx.translate(x + (lvl === 4 && t % 800 < 90 ? 0.7 : 0), y);
+  ctx.scale(sx, sx);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.globalAlpha = alpha * (lvl === 0 ? 0.78 + 0.22 * beat : 1);
+  const base = rgba([Math.min(255, c[0] + 40), Math.min(255, c[1] + 40), Math.min(255, c[2] + 40)], 1);
+  if (st === 2) {
+    const o = (0.8 + 0.4 * lvl) * Math.max(0.7, size / 40);
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = rgba(NEON_CY, 0.7);
+    ctx.fillText(txt, -o, 0);
+    ctx.fillStyle = rgba(NEON_PK, 0.7);
+    ctx.fillText(txt, o, 0);
+    ctx.globalCompositeOperation = "source-over";
+  }
+  let fill: string | CanvasGradient = base;
+  const shp = [0, 0, 3600, 2400, 1500][lvl];
+  if (shp > 0 && !REDUCED) {
+    const p = ((t % shp) / shp) * 1.7 - 0.35;
+    const g = ctx.createLinearGradient(-w0 / 2, 0, w0 / 2, 0);
+    const q = (v: number): number => Math.max(0, Math.min(1, v));
+    g.addColorStop(0, base);
+    g.addColorStop(q(p - 0.16), base);
+    g.addColorStop(q(p), "#ffffff");
+    g.addColorStop(q(p + 0.16), base);
+    g.addColorStop(1, base);
+    fill = g;
+  }
+  ctx.shadowColor = rgba(c, 0.45 + 0.1 * lvl);
+  ctx.shadowBlur = size * (0.18 + 0.17 * lvl) * (0.55 + 0.45 * beat);
+  ctx.fillStyle = fill;
+  ctx.fillText(txt, 0, 0);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+// Five pips under the word: the filled ones carry the level colours
+function livePips(ctx: CanvasRenderingContext2D, cx: number, y: number, zr: number, lvl: number, now: number): void {
+  const gap = zr * 0.085;
+  const r = Math.max(1.6, zr * 0.016);
+  const beat = REDUCED ? 0 : 0.5 + 0.5 * Math.sin(now / 420);
+  for (let i = 0; i < 5; i++) {
+    const x = cx + (i - 2) * gap;
+    if (i <= lvl) {
+      ctx.fillStyle = rgba(LIVE_RGB[i], i === lvl ? 0.8 + 0.2 * beat : 0.75);
+      ctx.beginPath();
+      ctx.arc(x, y, r * (i === lvl ? 1.25 + 0.2 * beat : 1), 0, TAU2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = "rgba(160,180,210,0.25)";
+      ctx.beginPath();
+      ctx.arc(x, y, r * 0.8, 0, TAU2);
+      ctx.fill();
+    }
+  }
+}
+
 // Dial centre board; the avatar ring pulses when a follow particle arrives, and the whole ring flashes at the end of a turn
 function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: number, now: number, font: string, opts: DrawOpts, N: number, arriving: number, cur: number): void {
   const st = opts.style;
@@ -1138,7 +1487,7 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
   const pulse = Math.min(1, arriving * 0.22);
   const fin = opts.fin >= 0 && opts.fin <= 1 ? opts.fin : -1;
   const boost = pulse * 0.7 + (fin >= 0 ? Math.sin(Math.PI * fin) : 0);
-  const tc = TIERS[opts.tier].rgb;
+  let tc = LIVE_RGB[0];
   ctx.globalCompositeOperation = "lighter";
   if (opts.showFollow) {
     glowAt(ctx, PART_RGB, cx, cx, zr * (1.05 + 0.35 * pulse), 0.07 + 0.3 * pulse);
@@ -1183,21 +1532,54 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
   ROLL.eng = ease(ROLL.eng, b.eng, kk);
   ROLL.fol = ease(ROLL.fol, b.fol, kk);
   const fol = Math.round(ROLL.fol);
-  const items: { l: string; v: string; c: number[] }[] = [];
+  // Live status first: the aura, the background layer and the word all follow it
+  liveStep(cur, now);
+  const lvl = LIVE.lvl;
+  const lk = LIVE.k;
+  tc = LIVE_RGB[lvl];
+  if (v.status) liveBg(ctx, cx, zr, lvl, lk, now);
+  // Hierarchy: primary = engagement (falls back to the first enabled metric), then the post counts, then the secondary metrics (impressions, followers, follower change)
+  type Item = { l: string; v: string; c: number[] };
   const na = tx("缺失", "n/a");
-  if (v.follow) items.push({ l: tx("关注变化", "Followers Δ"), v: (fol > 0 ? "+" : "") + fol, c: PART_RGB });
-  if (v.fans && FOLLOW_NOW !== null) items.push({ l: tx("粉丝", "Followers"), v: fmtN(FOLLOW_NOW - FOLLOW_DELTA + fol), c: [226, 236, 250] });
-  if (v.imp) items.push({ l: tx("曝光", "Impressions"), v: HAS_IMP ? fmtN(ROLL.imp) : na, c: [255, 206, 130] });
-  if (v.eng) items.push({ l: tx("互动", "Engagement"), v: HAS_ENG ? fmtN(ROLL.eng) : na, c: [255, 150, 180] });
-  if (v.posts) items.push({ l: tx("发帖/回复/引用", "Posts/replies/quotes"), v: b.n[0] + "/" + b.n[1] + "/" + b.n[2], c: [190, 205, 228] });
-  const hasM = items.length > 0;
-  const nr = items.length > 3 ? 2 : items.length > 1 ? 1 : 0;
-  const mainY = [0.52, 0.44, 0.38][nr];
-  const r1Y = nr === 1 ? 0.7 : 0.62;
+  const mEng: Item | null = v.eng ? { l: tx("互动", "Engagement"), v: HAS_ENG ? fmtN(ROLL.eng) : na, c: [255, 150, 180] } : null;
+  const mImp: Item | null = v.imp ? { l: tx("曝光", "Impressions"), v: HAS_IMP ? fmtN(ROLL.imp) : na, c: [255, 206, 130] } : null;
+  const mFans: Item | null = v.fans && FOLLOW_NOW !== null ? { l: tx("粉丝", "Followers"), v: fmtN(FOLLOW_NOW - FOLLOW_DELTA + fol), c: [226, 236, 250] } : null;
+  const mFol: Item | null = v.follow ? { l: tx("关注变化", "Followers Δ"), v: (fol > 0 ? "+" : "") + fol, c: PART_RGB } : null;
+  const order = [mEng, mImp, mFans, mFol];
+  const prim = order.find((x) => x !== null) ?? null;
+  const sec = order.filter((x) => x !== null && x !== prim) as Item[];
+  const rows: { ps: { t: string; c: string }[]; sz: number }[] = [];
+  if (v.posts) {
+    const kn = [tx("发帖 ", "Posts "), tx("回帖 ", "Replies "), tx("引用 ", "Quotes ")];
+    const ps: { t: string; c: string }[] = [];
+    for (let kd = 0; kd < 3; kd++) {
+      if (kd > 0) ps.push({ t: "  ", c: "#9fb2cc" });
+      ps.push({ t: kn[kd], c: "#a9bbd3" });
+      ps.push({ t: String(b.n[kd]), c: rgba(kcol(st, kd), 1) });
+    }
+    rows.push({ ps, sz: 0.118 });
+  }
+  const secRow = (xs: Item[], sz: number) => {
+    const ps: { t: string; c: string }[] = [];
+    xs.forEach((m, i) => {
+      if (i > 0) ps.push({ t: "   ", c: "#7f93b0" });
+      ps.push({ t: m.l + " ", c: "#7f93b0" });
+      ps.push({ t: m.v, c: rgba(m.c, 0.92) });
+    });
+    rows.push({ ps, sz });
+  };
+  if (sec.length === 3) {
+    secRow(sec.slice(0, 2), 0.105);
+    secRow(sec.slice(2), 0.1);
+  } else if (sec.length > 0) secRow(sec, 0.105);
+  const nr = rows.length;
+  const hasM = prim !== null || nr > 0;
+  const slots = nr === 3 ? [0.53, 0.67, 0.79] : nr === 2 ? [0.57, 0.72] : nr === 1 ? [0.66] : [];
+  const mainY = prim === null ? 0 : [0.46, 0.38, 0.32, 0.27][nr];
   const chord = (f: number): number => Math.max(24, 2 * Math.sqrt(Math.max(0.02, 1 - Math.pow(Math.abs(f) + 0.08, 2))) * zr * 0.9);
   if (hasM) {
     // Lower-half gradient mask
-    const top = cx + zr * (mainY - 0.24);
+    const top = cx + zr * (prim !== null ? mainY - 0.3 : slots[0] - 0.12);
     const mg = ctx.createLinearGradient(0, top, 0, cx + zr);
     mg.addColorStop(0, rgba(TINT[st], 0));
     mg.addColorStop(1, rgba(TINT[st], 0.42));
@@ -1210,11 +1592,11 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
     ctx.restore();
   }
   // Avatar (or the status badge) + status motion + stylised halo
-  const ay = cx + zr * (hasM ? -0.34 : -0.06);
-  const ra = zr * (hasM ? 0.3 : 0.42) * (v.avatar ? 1 : 0.55);
+  const ay = cx + zr * (hasM ? (v.status ? -0.43 : -0.48) : -0.06);
+  const ra = zr * (hasM ? (v.status ? 0.175 : 0.23) : 0.42) * (v.avatar ? 1 : 0.55);
   if (v.avatar || v.status) {
     if (v.status) {
-      statusAura(ctx, cx, ay, ra, opts.tier, now, sc);
+      statusAura(ctx, cx, ay, ra, [4, 1, 2, 0, 0][lvl], tc, [1, 1, 1, 0.55, 1][lvl], now, sc);
       if (st > 0) decor(ctx, st, cx, ay - ra * 0.19, ra * 1.9, now, tc);
     }
     const rc = RING[st];
@@ -1292,8 +1674,8 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
   const nameOn = v.name && NAME !== "";
   const handleOn = v.handle && HANDLE !== "";
   if (nameOn || handleOn) {
-    const ny = v.avatar || v.status ? ay + ra + Math.max(zr * 0.12, 8 * sc) : cx + zr * (hasM ? -0.34 : 0);
-    const fs = Math.max(8, zr * 0.125);
+    const ny = v.avatar || v.status ? ay + ra + Math.max(zr * 0.09, 7 * sc) : cx + zr * (hasM ? -0.34 : 0);
+    const fs = Math.max(8, zr * 0.11);
     const mw = chord((ny - cx) / zr);
     ctx.font = "600 " + fs + "px " + font;
     const w1 = ctx.measureText(NAME + "  " + HANDLE).width;
@@ -1309,48 +1691,38 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
       pieceRow(ctx, ps, cx, ny, mw, fs, font, "600 ");
     }
   }
-  // Today's status label
+  // Live status word with a short cross-fade when the level changes, plus the level pips
   if (v.status) {
-    bigText(ctx, TIERS[opts.tier].name, cx, cx - zr * 0.84, Math.max(8.5, zr * 0.14), tc, st, now, font);
+    const names = liveNames();
+    const wy = cx - zr * 0.8;
+    const wsz = Math.max(9, zr * 0.13);
+    const u = Math.min(1, (now - LIVE.at) / 450);
+    if (u < 1 && !REDUCED) {
+      liveWord(ctx, names[LIVE.prev], cx, wy + zr * 0.04 * u, wsz, zr * 0.9, LIVE.prev, now, st, font, 1 - u);
+      liveWord(ctx, names[lvl], cx, wy - zr * 0.04 * (1 - u), wsz, zr * 0.9, lvl, now, st, font, u);
+    } else liveWord(ctx, names[lvl], cx, wy, wsz, zr * 0.9, lvl, now, st, font, 1);
+    livePips(ctx, cx, cx - zr * 0.69, zr, lvl, now);
   }
-  // Core metrics: main metric large, secondary metrics as two small lines
-  if (hasM) {
-    const m = items[0];
-    const msz = Math.max(11, zr * 0.27);
-    const lsz = Math.max(8, msz * 0.42);
-    ctx.font = lsz + "px " + font;
-    const wl = ctx.measureText(m.l).width;
-    ctx.font = "600 " + msz + "px " + font;
-    const wv = ctx.measureText(m.v).width;
-    const gap = 5 * sc;
-    const tot = wl + gap + wv;
-    const s = Math.min(1, chord(mainY) / tot);
-    ctx.save();
-    ctx.translate(cx, cx + zr * mainY);
-    ctx.scale(s, s);
-    ctx.font = lsz + "px " + font;
-    ctx.textAlign = "left";
+  // Primary metric: the large number with its label above it
+  if (prim !== null) {
+    const my = cx + zr * mainY;
+    const msz = Math.max(13, zr * 0.29);
+    const lsz = Math.max(8.5, zr * 0.095);
+    ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillStyle = "#8fa6c4";
-    ctx.fillText(m.l, -tot / 2, 0);
-    bigText(ctx, m.v, -tot / 2 + wl + gap + wv / 2, 0, msz, m.c, st, now, font);
+    ctx.font = "600 " + lsz + "px " + font;
+    ctx.fillStyle = "#b8c8de";
+    ctx.fillText(prim.l, cx, my - msz * 0.72);
+    ctx.font = "600 " + msz + "px " + font;
+    const wv = ctx.measureText(prim.v).width;
+    const s1 = Math.min(1, chord(mainY) / Math.max(1, wv));
+    ctx.save();
+    ctx.translate(cx, my);
+    ctx.scale(s1, s1);
+    bigText(ctx, prim.v, 0, 0, msz, prim.c, st, now, font);
     ctx.restore();
-    const rows = [r1Y, 0.8];
-    for (let r = 0; r < 2; r++) {
-      const a = items[1 + r * 2];
-      const c2 = items[2 + r * 2];
-      if (!a) continue;
-      const ps: { t: string; c: string }[] = [
-        { t: a.l + " ", c: "#8fa6c4" },
-        { t: a.v, c: rgba(a.c, 1) },
-      ];
-      if (c2) {
-        ps.push({ t: "   " + c2.l + " ", c: "#8fa6c4" });
-        ps.push({ t: c2.v, c: rgba(c2.c, 1) });
-      }
-      pieceRow(ctx, ps, cx, cx + zr * rows[r], chord(rows[r]), Math.max(8, zr * 0.125), font, "");
-    }
   }
+  for (let r = 0; r < nr; r++) pieceRow(ctx, rows[r].ps, cx, cx + zr * slots[r], chord(slots[r]), Math.max(8, zr * rows[r].sz), font, "");
 }
 
 // Galaxy / Neon wave styles: same data and encoding, only the visual language changes
@@ -1554,9 +1926,9 @@ function draw(canvas: HTMLCanvasElement, S: number, cur: number, now: number, ho
   ctx.beginPath();
   ctx.arc(cx, cx, rim * 0.9, 0, TAU);
   ctx.stroke();
-  for (let h = 0; h < 24; h++) {
-    const a = (h / 24) * TAU - Math.PI / 2;
-    const major = h % 3 === 0;
+  for (const tk of TICKS) {
+    const a = tk.a;
+    const major = tk.major;
     const len = (major ? 10 : 4) * sc;
     ctx.strokeStyle = major ? "rgba(190,215,255,0.55)" : "rgba(160,190,230,0.22)";
     ctx.beginPath();
@@ -1569,7 +1941,7 @@ function draw(canvas: HTMLCanvasElement, S: number, cur: number, now: number, ho
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const lr = rim + g.margin * 0.55;
-      ctx.fillText(tzHM(h * 3600), cx + Math.cos(a) * lr, cx + Math.sin(a) * lr);
+      ctx.fillText(tk.label, cx + Math.cos(a) * lr, cx + Math.sin(a) * lr);
     }
   }
 
@@ -1733,7 +2105,7 @@ function draw(canvas: HTMLCanvasElement, S: number, cur: number, now: number, ho
 // click on the music buttons, and is routed through a compressor, a limiter and a soft clipper so it cannot clip.
 // If AudioContext is unavailable (sandboxed page, old browser) the buttons stay inert and everything else works.
 // =====================================================================================================
-const MUSIC_NAMES = [tx("关", "Off"), tx("律动", "Pulse"), tx("钢琴", "Piano"), tx("古典", "Classical")];
+const musicNames = (): string[] => [tx("关", "Off"), tx("律动", "Pulse"), tx("钢琴", "Piano"), tx("古典", "Classical")];
 const BPM = 100;
 const SLOT = 60 / BPM / 4; // sixteenth note
 const PENT = [0, 3, 5, 7, 10]; // A minor pentatonic
@@ -1743,17 +2115,11 @@ const CHORDS: number[][] = [
   [48, 55, 60, 64], // C
   [43, 50, 55, 59], // G
 ];
-const NODE_TS: number[] = NODES.map((n) => n.ts);
-const ARR_AT: number[] = PARTS.map((p) => p.ts + 14400).sort((a, b) => a - b);
-const ACT: number[] = (() => {
-  const c: number[] = [];
-  for (let h = 0; h < 24; h++) c.push(0);
-  for (const n of NODES) c[Math.min(23, Math.floor(n.ts / 3600))] += 1 + 2 * n.bright;
-  const mx = Math.max(1, ...c);
-  return c.map((v) => Math.sqrt(v / mx));
-})();
+let NODE_TS: number[] = [];
+let ARR_AT: number[] = [];
+let ACT: number[] = [];
 function actAt(cur: number): number {
-  const x = Math.max(0, Math.min(23.999, cur / 3600 - 0.5));
+  const x = Math.max(0, Math.min(23.999, (cur / DAY) * 24 - 0.5));
   const a = Math.floor(x);
   const f = x - a;
   return ACT[a] * (1 - f) + ACT[Math.min(23, a + 1)] * f;
@@ -1763,6 +2129,51 @@ function hz(m: number): number {
 }
 function hsh(i: number): number {
   return frac(Math.sin(i * 12.9898 + 4.1) * 43758.5453);
+}
+function liveRaw(cur: number): number {
+  let r = 0;
+  for (let i = lowerBound(NODE_TS, cur) - 1; i >= 0; i--) {
+    const d = cur - NODE_TS[i];
+    if (d > LIVE_WIN) break;
+    r += NODE_P[i] * Math.exp(-d / LIVE_TAU);
+  }
+  return r;
+}
+function liveStep(cur: number, now: number): void {
+  const L = LIVE;
+  const raw = liveRaw(cur);
+  const dt = Math.min(250, Math.max(0, now - L.t));
+  L.t = now;
+  const jump = !L.init || cur < L.cur || cur - L.cur > 900;
+  L.cur = cur;
+  L.raw = raw;
+  const T = LIVE_T;
+  if (jump) {
+    L.sm = raw;
+    let l = 0;
+    while (l < 4 && raw >= T[l]) l++;
+    L.lvl = l;
+    L.prev = l;
+    L.at = -1e9;
+    L.init = true;
+  } else {
+    L.sm = ease(L.sm, raw, 1 - Math.exp(-dt / 600));
+    // hysteresis: step up when the smoothed score reaches the next cut, step down only after it falls 35% below the cut under the current level; minimum dwell per step
+    const dwell = now - L.at;
+    if (L.lvl < 4 && L.sm >= T[L.lvl] && dwell > 600) {
+      L.prev = L.lvl;
+      L.lvl++;
+      L.at = now;
+    } else if (L.lvl > 0 && L.sm < T[L.lvl - 1] * 0.65 && dwell > 1500) {
+      L.prev = L.lvl;
+      L.lvl--;
+      L.at = now;
+    }
+  }
+  const lo = L.lvl === 0 ? 0 : T[L.lvl - 1];
+  const hi = L.lvl === 4 ? T[3] * 1.8 : T[L.lvl];
+  const f = Math.max(0, Math.min(1, (L.sm - lo) / Math.max(1e-6, hi - lo)));
+  L.k = Math.max(0, Math.min(1, (L.lvl + 0.6 * f) / 4));
 }
 function lowerBound(arr: number[], v: number): number {
   let lo = 0;
@@ -2105,35 +2516,112 @@ class MusicEngine {
   }
 }
 
+// Switch the whole module state to day i (called from <Replay> before it renders with that day)
+function selectDay(i: number): void {
+  const d = DAYS[i];
+  CUR_DAY = i;
+  DAY = d.len;
+  START_S = d.startS;
+  FOL = d.fol;
+  HAS_FOL = FOL.delta !== null && Number.isFinite(FOL.delta);
+  FOLLOW_DELTA = HAS_FOL ? Math.round(FOL.delta as number) : 0;
+  FOLLOW_NOW = FOL.current !== null && Number.isFinite(FOL.current) ? FOL.current : null;
+  STATUS = d.status !== null && typeof d.status === "object" ? d.status : null;
+  HAS_STATUS = STATUS !== null;
+  TIER = STATUS === null || !Number.isFinite(STATUS.tier) ? 2 : Math.max(0, Math.min(4, Math.round(STATUS.tier)));
+  IS_YDAY = isYesterday(d);
+  NODES = buildNodes();
+  PARTS = buildParts();
+  COUNT_BY_KIND[0] = 0;
+  COUNT_BY_KIND[1] = 0;
+  COUNT_BY_KIND[2] = 0;
+  SELF_N = 0;
+  MISSING_N = 0;
+  HAS_IMP = false;
+  HAS_ENG = false;
+  ANY_TEXT = false;
+  for (const n of NODES) {
+    COUNT_BY_KIND[n.kind] += 1;
+    if (n.self) SELF_N += 1;
+    if (n.v === null || n.l === null || n.r === null || n.c === null || n.q === null) MISSING_N += 1;
+    if (n.v !== null) HAS_IMP = true;
+    if (n.l !== null || n.r !== null || n.c !== null || n.q !== null) HAS_ENG = true;
+    if (n.text !== "") ANY_TEXT = true;
+  }
+  // Dial ticks sit on real local hours (a 23 h / 25 h day has 23 / 25 of them; a skipped hour is simply missing); every third local hour is labelled
+  TICKS = [];
+  for (let t = 0; t < DAY - 1; t += 900) {
+    const lp = lparts(START_S + t);
+    if (lp.mi !== 0 && t > 0) continue;
+    TICKS.push({ a: (t / DAY) * TAU2 - Math.PI / 2, major: lp.mi === 0 && lp.h % 3 === 0, label: pad2(lp.h) + ":" + pad2(lp.mi) });
+  }
+  AVAIL = { ...VIS_TRUE, handle: HANDLE !== "", name: NAME !== "", follow: HAS_FOL, fans: FOLLOW_NOW !== null, text: ANY_TEXT };
+  VIS_TOTAL = Object.values(AVAIL).filter((x) => x).length;
+  FOL0 = FOLLOW_DELTA - PARTS.length;
+  ROLL = { imp: 0, eng: 0, fol: FOL0, t: 0 };
+  BIG_IDX = NODES.filter((n) => n.tier > 0).map((n) => n.idx);
+  NODE_TS = NODES.map((n) => n.ts);
+  {
+    const eng = (n: NodeT): number => (n.l ?? 0) + (n.r ?? 0) + (n.c ?? 0) + (n.q ?? 0);
+    const med = (a: number[]): number => {
+      const b = a.filter((x) => x > 0).sort((x, y) => x - y);
+      return b.length === 0 ? 1 : Math.max(1, b[b.length >> 1]);
+    };
+    const mE = med(NODES.map(eng));
+    const mV = med(NODES.map((n) => n.v ?? 0));
+    NODE_P = NODES.map((n) => 1 + eng(n) / (eng(n) + mE) + (n.v ?? 0) / ((n.v ?? 0) + mV));
+    const grid: number[] = [];
+    for (let g = 0; g < 288; g++) grid.push(liveRaw((g / 288) * DAY));
+    grid.sort((a, b) => a - b);
+    LIVE_T = LIVE_Q.map((q, i) => Math.max(LIVE_ABS[i], grid[Math.floor(q * grid.length)]));
+    for (let i = 1; i < 4; i++) LIVE_T[i] = Math.max(LIVE_T[i], LIVE_T[i - 1] * 1.2);
+    LIVE.init = false;
+  }
+  ARR_AT = PARTS.map((p) => p.ts + 14400).sort((a, b) => a - b);
+  const c: number[] = [];
+  for (let h = 0; h < 24; h++) c.push(0);
+  for (const n of NODES) c[Math.min(23, Math.floor((n.ts / DAY) * 24))] += 1 + 2 * n.bright;
+  const mx = Math.max(1, ...c);
+  ACT = c.map((v) => Math.sqrt(v / mx));
+}
+if (BAD_DATA === null) selectDay(DAYS.length - 1);
+
 function Replay() {
   const theme = useGrokTheme();
+  const [lang, setLangState] = useState<Lang>(initialLang);
+  LANG = lang; // before anything below calls tx()
+  const [dayIdx, setDayIdx] = useState<number>(DAYS.length - 1);
+  if (CUR_DAY !== dayIdx) selectDay(dayIdx); // module state follows the selected day before anything below reads it
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [avail, setAvail] = useState<number>(360);
   const [aspect, setAspect] = useState<number>(0);
   const [panel, setPanel] = useState<boolean>(false);
   const [prog, setProg] = useState<number>(0);
-  const [playing, setPlaying] = useState<boolean>(true);
+  const [playing, setPlaying] = useState<boolean>(!REDUCED);
   const [speed, setSpeed] = useState<number>(1);
   const [tip, setTip] = useState<{ idx: number; pinned: boolean; left: number } | null>(null);
-  const [vis, setVis] = useState<Vis>(VIS_ALL);
+  const [vis0, setVis] = useState<Vis>(VIS_TRUE);
+  // Effective switches: the viewer's choice AND the item exists for the selected day
+  const vis: Vis = { ...vis0 };
+  for (const k of Object.keys(vis) as (keyof Vis)[]) vis[k] = vis0[k] && AVAIL[k];
   const [style, setStyle] = useState<number>(0);
   const [music, setMusic] = useState<number>(0);
   const [vol, setVol] = useState<number>(70);
   const [audioErr, setAudioErr] = useState<boolean>(false);
   const tipElRef = useRef<HTMLDivElement>(null);
   const [tipDy, setTipDy] = useState<number>(0);
-  const actRef = useRef<{ toggle: () => void; step: (d: number) => void }>({ toggle: () => {}, step: () => {} });
+  const actRef = useRef<{ toggle: () => void; step: (d: number) => void; lang: () => void }>({ toggle: () => {}, step: () => {}, lang: () => {} });
   // Aspect ratios: 1:1 / 9:16 / 16:9 fixed frames; the dial size is the frame minus legend and status line
   const fw = Math.max(280, Math.min(avail, aspect === 0 ? 800 : aspect === 1 ? 460 : 1040));
   const fh0 = aspect === 0 ? fw : aspect === 1 ? Math.round((fw * 16) / 9) : Math.round((fw * 9) / 16);
   const lh = vis.legend ? (fw < 560 ? 64 : 46) : 0;
-  const sh = vis.status ? 26 : 0;
+  const sh = vis.status && HAS_STATUS ? 26 : 0;
   const size = Math.floor(Math.max(220, Math.min(fw - 24, fh0 - 24 - lh - sh)));
   const fh = Math.max(fh0, size + 24 + lh + sh);
 
   const progRef = useRef<number>(0);
-  const playRef = useRef<boolean>(true);
+  const playRef = useRef<boolean>(!REDUCED);
   const speedRef = useRef<number>(1);
   const sizeRef = useRef<number>(360);
   const tipRef = useRef<number>(-1);
@@ -2149,7 +2637,7 @@ function Replay() {
   const audRef = useRef<{ ctx: AudioContext; eng: MusicEngine } | null>(null);
   const lastCurRef = useRef<number>(0);
   musicRef.current = music;
-  const optsRef = useRef<DrawOpts>({ tier: TIER, showFollow: true, showTime: true, style: 0, fin: -1, vis: VIS_ALL });
+  const optsRef = useRef<DrawOpts>({ tier: TIER, showFollow: true, showTime: true, style: 0, fin: -1, vis: VIS_TRUE });
   optsRef.current = { tier: TIER, showFollow: vis.follow, showTime: vis.time, style, fin: optsRef.current.fin, vis };
 
   useEffect(() => {
@@ -2175,6 +2663,8 @@ function Replay() {
       if (e.key === " " && (tag !== "INPUT" || isRange)) {
         e.preventDefault();
         actRef.current.toggle();
+      } else if (tag !== "INPUT" && (e.key === "l" || e.key === "L") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        actRef.current.lang();
       } else if (tag !== "INPUT" && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
         e.preventDefault();
         actRef.current.step((e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 1 / 24 : 1 / 144));
@@ -2239,7 +2729,7 @@ function Replay() {
       lastCurRef.current = progRef.current * DAY;
       const cv = canvasRef.current;
       const o = optsRef.current;
-      o.fin = endAtRef.current > 0 ? (now - endAtRef.current) / 2400 : -1;
+      o.fin = endAtRef.current > 0 && !REDUCED ? (now - endAtRef.current) / 2400 : -1;
       if (cv) (o.style === 0 ? draw : drawStyled)(cv, sizeRef.current, progRef.current * DAY, now, tipRef.current, fontRef.current, o);
       raf = requestAnimationFrame(loop);
     };
@@ -2377,7 +2867,23 @@ function Replay() {
     setProg(p);
     setPlaying(false);
   };
-  actRef.current = { toggle: togglePlay, step };
+  const pickDay = (i: number) => {
+    if (i === dayIdx) return;
+    selectDay(i);
+    setDayIdx(i);
+    progRef.current = 0;
+    setProg(0);
+    endAtRef.current = 0;
+    playRef.current = true;
+    setTip(null);
+    setPlaying(true);
+  };
+  const setLang = (l: Lang) => {
+    LANG = l;
+    setLangState(l);
+    saveLang(l);
+  };
+  actRef.current = { toggle: togglePlay, step, lang: () => setLang(lang === "zh" ? "en" : "zh") };
 
   const cur = prog * DAY;
   let fired = 0;
@@ -2431,11 +2937,11 @@ function Replay() {
         }}
       >
         <div style={{ color: rgba(col, 1), marginBottom: 4 }}>
-          {vis.time ? tzDT(tn.ts, true) + " " + DATA.window.tz.label + " · " : ""}
-          {KIND_NAME[tn.kind]}
+          {vis.time ? tzDT(tn.ts, true) + " " + TZ_LABEL + " · " : ""}
+          {kindName(tn.kind)}
           {tn.self ? tx(" · 续写自己", " · self-thread") : ""}
         </div>
-        {vis.text ? <div style={{ fontSize: 13, lineHeight: "19px", marginBottom: 6, wordBreak: "break-all" }}>{tn.text}</div> : null}
+        {vis.text && tn.text !== "" ? <div style={{ fontSize: 13, lineHeight: "19px", marginBottom: 6, wordBreak: "break-all" }}>{tn.text}</div> : null}
         {vis.imp || vis.eng ? (
           <div style={{ color: "#a9bad2", marginBottom: 4 }}>
             {[
@@ -2501,14 +3007,15 @@ function Replay() {
     "中心看板：曝光、互动是窗口内全部 " + NODES.length + " 条（发帖+回复+引用）累计到指针位置，数字随回放滚动" + (HAS_FOL ? "；关注变化随关注粒子被吸入时累加，播完停在 " + (FOLLOW_DELTA > 0 ? "+" : "") + FOLLOW_DELTA + "，粉丝数 = 基线 + 关注变化（净增量，不含取关拆分）。" : "。"),
     "Center board: impressions and engagement are running totals of all " + NODES.length + " posts (posts + replies + quotes) up to the hand, rolling as the replay plays" + (HAS_FOL ? ". Follower change counts up as particles arrive and rests at " + (FOLLOW_DELTA > 0 ? "+" : "") + FOLLOW_DELTA + "; followers = baseline + change (net change, follows and unfollows are not split)." : "."),
   );
+  const statusTxt = STATUS === null ? "" : pickNote(STATUS.note);
   const ratioOk = STATUS !== null && STATUS.ratio !== null && Number.isFinite(STATUS.ratio);
   const statusNote =
     STATUS === null
       ? ""
       : [
-          tx("今日状态：", "Today's status: ") + STATUS.note,
-          ratioOk ? tx("今日倍数 ", "Multiple ") + (STATUS.ratio as number).toFixed(2) + "×（" + TIER_RULE + "）" + tx("。", ".") : "",
-          tx("当前为「" + TIERS[TIER].name + "」。", "Currently “" + TIERS[TIER].name + "”."),
+          statusTxt !== "" ? (LANG === "zh" ? dayWord() + "状态：" : dayWord() + "'s status: ") + statusTxt : "",
+          ratioOk ? (LANG === "zh" ? dayWord() + "倍数 " : "Multiple ") + (STATUS.ratio as number).toFixed(2) + tx("×（", "× (") + tierRule() + tx("）。", ").") : "",
+          tx("评为「" + TIERS[TIER].name + "」。", "Rated “" + TIERS[TIER].name + "”."),
         ]
           .filter((x) => x !== "")
           .join(" ");
@@ -2548,20 +3055,34 @@ function Replay() {
     </div>
   );
 
+  const dd = DAYS[CUR_DAY];
+  const hrs = Math.round((DAY / 3600) * 100) / 100;
+  const dayLenNote = DAY === 86400 ? "" : tx("该日 " + hrs + " 小时（夏令时切换）", hrs + "-hour day (clock change)");
+  const title = DAYS.length > 1 ? tx("X 脉搏 · 每日回放", "X Pulse · Daily replay") : IS_YDAY ? tx("X 脉搏 · 昨日回放", "X Pulse · Yesterday's replay") : tx("X 脉搏 · " + dd.date + " 回放", "X Pulse · Replay of " + dd.date);
   return (
     <div style={{ background: theme.bg.base, color: theme.text.primary, padding: "24px 16px 36px", fontFamily: theme.font.family }}>
       <div style={{ maxWidth: 1040, margin: "0 auto" }}>
-        <div style={{ ...theme.font.heading2, color: theme.text.primary, fontWeight: theme.weight.semibold }}>{tx("X 脉搏 · 24 小时回放", "X Pulse · 24-hour replay")}</div>
+        <div style={{ ...theme.font.heading2, color: theme.text.primary, fontWeight: theme.weight.semibold }}>{title}</div>
         <div style={{ ...theme.font.subtext, color: theme.text.secondary, marginTop: 6, marginBottom: 18, lineHeight: "20px" }}>
-          {[DATA.example ? tx("示例数据", "EXAMPLE DATA") : "", vis.name ? NAME : "", vis.handle ? HANDLE : "", DATA.window.tz.label, vis.time ? tzDT(0, false) + " → " + tzDT(DAY, false) : "", tx("起点 " + tzHM(0) + " 在顶部，指针转一圈 = 24 小时", "Start (" + tzHM(0) + ") at the top, one hand turn = 24 hours")]
+          {[DATA.example ? tx("示例数据", "EXAMPLE DATA") : "", vis.name ? NAME : "", vis.handle ? HANDLE : "", TZ_LABEL, vis.time ? DAYS[CUR_DAY].date + " " + wday(DAYS[CUR_DAY].ymd) : "", dayLenNote, tx("0 点在顶部，指针转一圈 = 一整天", "Midnight at the top, one hand turn = the whole day")]
             .filter((s) => s !== "")
             .join(" · ")}
         </div>
 
+        {DAYS.length > 1 ? (
+          <div data-days="1" role="group" aria-label={tx("选择日期", "Select a day")} style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+            {DAYS.map((d, i) => (
+              <button key={d.date} data-day={d.date} aria-pressed={i === dayIdx} onClick={() => pickDay(i)} style={{ ...tbtn(i === dayIdx), minHeight: 34, padding: "0 12px", fontSize: 13, fontWeight: i === dayIdx ? 600 : 400 }}>
+                {(isYesterday(d) ? tx("昨日", "Yesterday") : wday(d.ymd)) + " " + d.date.slice(5)}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "10px 18px", marginBottom: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ ...theme.font.label, color: theme.text.tertiary }}>{tx("风格", "Style")}</span>
-              {seg(STYLE_NAMES, style, (i) => {
+              {seg(styleNames(), style, (i) => {
                 setStyle(i);
                 setTip(null);
               })}
@@ -2573,11 +3094,11 @@ function Replay() {
                 setTip(null);
               })}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
               <button data-music="toggle" aria-pressed={music > 0} disabled={audioErr} title={audioErr ? tx("此环境不支持音频", "Audio is not available here") : ""} onClick={() => pickMusic(music > 0 ? 0 : lastMusicRef.current)} style={{ ...tbtn(music > 0), opacity: audioErr ? 0.45 : 1 }}>
                 {tx("🎵 音乐 · ", "🎵 Music · ") + (music > 0 ? tx("开", "On") : tx("关", "Off"))}
               </button>
-              {seg(MUSIC_NAMES.slice(1), music - 1, (i) => pickMusic(i + 1))}
+              {seg(musicNames().slice(1), music - 1, (i) => pickMusic(i + 1))}
               <div
                 role="slider"
                 aria-label={tx("音量", "Volume")}
@@ -2598,6 +3119,9 @@ function Replay() {
             <button onClick={() => setPanel(!panel)} style={tbtn(panel)}>
               {tx("显示设置 · ", "Display · ") + nOn + "/" + VIS_TOTAL + (panel ? " ▴" : " ▾")}
             </button>
+            <div data-lang="switch" role="group" aria-label={tx("界面语言", "Language")} title={tx("界面语言（快捷键 L）", "Language (shortcut: L)")}>
+              {seg(["EN", "中文"], lang === "zh" ? 1 : 0, (i) => setLang(i === 1 ? "zh" : "en"))}
+            </div>
           </div>
 
         {!panel ? null : (
@@ -2605,7 +3129,7 @@ function Replay() {
             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
               <span style={{ ...theme.font.subtext, color: theme.text.secondary }}>{tx("每项独立开关，舞台画面完全按这里的勾选；录屏只录中间舞台", "Each item is an independent switch; the stage follows these checks. Record only the stage.")}</span>
               <span style={{ display: "inline-flex", gap: 8 }}>
-                <button style={tbtn(false)} onClick={() => setVis(VIS_ALL)}>
+                <button style={tbtn(false)} onClick={() => setVis(VIS_TRUE)}>
                   {tx("全开", "All on")}
                 </button>
                 <button style={tbtn(false)} onClick={() => setVis(VIS_NONE)}>
@@ -2613,7 +3137,7 @@ function Replay() {
                 </button>
               </span>
             </div>
-            {VIS_GROUPS.map((g) => (
+            {visGroups().map((g) => (
               <div key={g.title} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px 22px", padding: "10px 0", borderTop: "1px solid " + theme.border.subtle }}>
                 <span style={{ ...theme.font.label, color: theme.text.tertiary, minWidth: 64 }}>{g.title}</span>
                 {g.items.map((it) => (
@@ -2629,9 +3153,9 @@ function Replay() {
           {vis.legend ? (
             <div>
               <div style={{ fontSize: 13, lineHeight: "22px", marginBottom: 4 }}>
-                {legendItem(kcol(style, 0), KIND_NAME[0], COUNT_BY_KIND[0])}
-                {legendItem(kcol(style, 1), KIND_NAME[1], COUNT_BY_KIND[1])}
-                {legendItem(kcol(style, 2), KIND_NAME[2], COUNT_BY_KIND[2])}
+                {legendItem(kcol(style, 0), kindName(0), COUNT_BY_KIND[0])}
+                {legendItem(kcol(style, 1), kindName(1), COUNT_BY_KIND[1])}
+                {legendItem(kcol(style, 2), kindName(2), COUNT_BY_KIND[2])}
                 {vis.follow ? legendItem(PART_RGB, tx("新增关注", "New followers"), 0) : null}
               </div>
               <div style={{ fontSize: 11, color: "#7f93ae", marginBottom: 6 }}>
@@ -2647,7 +3171,7 @@ function Replay() {
             <div style={{ width: size, height: size, margin: "0 auto", position: "relative", flexShrink: 0 }}>
               <canvas
                 ref={canvasRef}
-                aria-label={tx("24 小时发帖回放表盘 · " + STYLE_NAMES[style] + "风格", "24-hour posting replay dial · " + STYLE_NAMES[style] + " style")}
+                aria-label={tx("24 小时发帖回放表盘 · " + styleNames()[style] + "风格", "24-hour posting replay dial · " + styleNames()[style] + " style")}
                 style={{ width: size, height: size, display: "block", touchAction: "manipulation", cursor: "pointer" }}
                 onPointerMove={onMove}
                 onPointerLeave={onLeave}
@@ -2656,9 +3180,9 @@ function Replay() {
               {tipEl}
             </div>
 
-          {vis.status ? (
+          {vis.status && HAS_STATUS ? (
             <div style={{ textAlign: "center", fontSize: 13, lineHeight: "22px", height: 22, color: "#9fb2cc" }}>
-              <span style={{ color: rgba(TIERS[TIER].rgb, 1), fontWeight: 600 }}>{tx("今日状态 · ", "Today · ")}{TIERS[TIER].name}</span>
+              <span style={{ color: rgba(TIERS[TIER].rgb, 1), fontWeight: 600 }}>{LANG === "zh" ? dayWord() + "状态 · " : dayWord() + " · "}{TIERS[TIER].name}</span>
               {" · " + TIERS[TIER].line}
             </div>
           ) : null}
@@ -2678,7 +3202,7 @@ function Replay() {
                 {tx("从头播放", "Restart")}
               </button>
               <span style={{ fontSize: 13, color: "#c9d6e8", fontVariantNumeric: "tabular-nums", lineHeight: "20px" }}>
-                {vis.time ? tzDT(cur, false) + " " + DATA.window.tz.label + " · " : ""}{tx("已亮 ", "Lit ")}{fired}/{NODES.length}
+                {vis.time ? tzDT(cur, false) + " " + TZ_LABEL + " · " : ""}{tx("已亮 ", "Lit ")}{fired}/{NODES.length}
               </span>
             </div>
             <div style={{ display: "inline-flex", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 10, overflow: "hidden" }}>
@@ -2717,7 +3241,7 @@ function Replay() {
               <span>{tzDT(DAY, false)}</span>
             </div>
           ) : null}
-          <div style={{ fontSize: 12, color: "#6f829c", marginTop: 8 }}>{tx("快捷键：空格 播放/暂停 · ← → 微调进度 10 分钟（Shift 1 小时）", "Shortcuts: Space play/pause · ← → step 10 minutes (Shift: 1 hour)")}</div>
+          <div style={{ fontSize: 12, color: "#6f829c", marginTop: 8 }}>{tx("快捷键：空格 播放/暂停 · ← → 微调进度 10 分钟（Shift 1 小时）· L 切换语言", "Shortcuts: Space play/pause · ← → step 10 minutes (Shift: 1 hour) · L switch language")}</div>
             </div>
           </div>
         </div>
@@ -2733,11 +3257,14 @@ function Replay() {
             <div style={{ marginBottom: 6 }}>{followNote}</div>
             <div style={{ marginBottom: 6 }}>{boardNote}</div>
             {statusNote !== "" ? <div style={{ marginBottom: 6 }}>{statusNote}</div> : null}
-            {fn.extra.map((x, i) => (
-              <div key={i} style={{ marginBottom: 6 }}>
-                {x}
-              </div>
-            ))}
+            {fn.extra.map((x, i) => {
+              const t = typeof x === "string" ? x : pickNote(x);
+              return t === "" ? null : (
+                <div key={i} style={{ marginBottom: 6 }}>
+                  {t}
+                </div>
+              );
+            })}
           </div>
         ) : null}
       </div>

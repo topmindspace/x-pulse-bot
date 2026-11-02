@@ -1,0 +1,20 @@
+{
+  "name": "x-pulse-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Headless-Chrome smoke tests for renderer/x-pulse-replay.tsx",
+  "scripts": {
+    "avatar": "python3 make_sample_avatar.py",
+    "typecheck": "mkdir -p src && cp ../renderer/x-pulse-replay.tsx src/replay.tsx && tsc -p .",
+    "test": "npm run avatar && npm run typecheck && node run.mjs"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "puppeteer-core": "^24.43.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2"
+  }
+}

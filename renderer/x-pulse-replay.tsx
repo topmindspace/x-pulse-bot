@@ -3,7 +3,7 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 
 // =====================================================================================================
 // X Pulse · daily replay renderer (generic, data-free)
-// Renderer version 3.0.0 (2026-11-02): 1-7 calendar days in the owner's IANA time zone (DST-aware), date chips, slim compact posts,
+// Renderer version 3.1.0 (2026-11-02): 1-7 calendar days in the owner's IANA time zone (DST-aware), date chips, slim compact posts,
 // in-page EN / 中文 switch. Bump this line when the renderer changes.
 //
 // This file is a READ-ONLY, NO-NETWORK canvas page. Everything it shows comes from the single DATA object
@@ -571,7 +571,10 @@ function tzHM(off: number): string {
 }
 function fmtIso(iso: string): string {
   const s = iso2s(iso);
-  return Number.isFinite(s) ? tzDT(s, false) + " " + TZ_LABEL : iso;
+  if (!Number.isFinite(s)) return iso;
+  // a real instant, even when it lies after the day's end (a metrics fetch time the next morning must not show as "24:00")
+  const d = lparts(START_S + s);
+  return pad2(d.mo) + "-" + pad2(d.d) + " " + pad2(d.h) + ":" + pad2(d.mi) + " " + TZ_LABEL;
 }
 function rgba(c: number[], a: number): string {
   return "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a.toFixed(3) + ")";

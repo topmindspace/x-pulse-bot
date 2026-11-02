@@ -4,7 +4,7 @@ import path from "path";
 import esbuild from "esbuild";
 import puppeteer from "puppeteer-core";
 
-const SRC = "../renderer/x-pulse-replay.tsx";
+const SRC = process.argv[2] || "../renderer/x-pulse-replay.tsx";
 const base = fs.readFileSync(SRC, "utf8");
 const A = "// ===== BEGIN DATA =====", B = "// ===== END DATA =====";
 const ai = base.indexOf(A), bi = base.indexOf(B);

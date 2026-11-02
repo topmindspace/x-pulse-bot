@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.1.0 (2026-11-02)
+
+No change to the DATA schema (v3). Build and data tooling, one renderer fix.
+
+- **`tools/build.py` + `tools/minify/`** produce `dist/x-pulse-replay.min.tsx` (about 94 KB instead of 139 KB; 32 KB gzip). The minifier uses the TypeScript 5 compiler API, removes comments and indentation, joins lines only where that is safe, renames nothing, keeps the `BEGIN DATA` / `END DATA` markers, prepends a one-line `// X Pulse renderer <version> (minified …)` header, and self-checks that the token stream is unchanged. `--typecheck` type-checks the minified file as well.
+- **`tools/fill_data.py`** (Python standard library + `zoneinfo`): raw X API posts + follower snapshots -> final page file. Local calendar days (yesterday back N days), DST and 45-minute zones, pure retweets dropped and counted, compact rows (one per line, snippets of at most 20 graphemes, `null` for missing metrics), follower delta only when snapshots bracket the day (else `null`), day status only with a baseline of at least 3 earlier days, and a size budget that keeps the top-N posts per day and states how many were omitted in the footnotes (EN and ZH). Prints a JSON summary. See the README for the input JSON.
+- `tests/test_fill_data.py` (14 tests), `tests/page.mjs` (render any finished page and screenshot it), `npm test` also type-checks the minified output and runs the Python tests.
+- **Fix:** a metrics fetch time after the day's end (for example the next morning) was shown as "24:00" in the footnote; `fmtIso` now formats the real local instant.
+
 ## 3.0.0 (2026-11-02)
 
 Breaking DATA change (v2 DATA still renders as one day).

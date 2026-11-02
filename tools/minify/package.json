@@ -1,0 +1,7 @@
+{
+  "name": "x-pulse-minify",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Whitespace/comment minifier for the X Pulse renderer (keeps every identifier and type)",
+  "devDependencies": { "typescript": "^5.9.0" }
+}

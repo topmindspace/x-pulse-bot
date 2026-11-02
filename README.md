@@ -15,14 +15,19 @@ A single-file, read-only canvas page for Grok Bot that replays one calendar day 
 
 ```
 renderer/x-pulse-replay.tsx   the page (DATA block + renderer)
-tools/build_avatar.py         profile image -> 96x96, 64-colour avatar block for DATA.avatar
-tests/                        headless-Chrome tests (optional): run.mjs, lang.mjs, days.mjs, dash.mjs
+dist/x-pulse-replay.min.tsx   the same renderer, minified (what a bot actually writes)
+tools/build.py                renderer -> dist min (tools/minify, TypeScript 5 compiler API), --typecheck
+tools/fill_data.py            raw X API data -> final page file (std lib + zoneinfo)
+tools/build_avatar.py         profile image -> small palette avatar block for DATA.avatar
+tests/                        headless-Chrome tests (optional): run.mjs, lang.mjs, days.mjs, dash.mjs, page.mjs; test_fill_data.py
 ```
 
 Raw URL for a bot to fetch (stable, `main` branch):
 
 ```
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/renderer/x-pulse-replay.tsx
+https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/dist/x-pulse-replay.min.tsx
+https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/fill_data.py
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avatar.py
 ```
 
@@ -52,7 +57,7 @@ How it is computed: every post adds a weight of 1 to 3 (1, plus how its engageme
 
 ## Using it from a Grok Bot (end to end)
 
-A new owner only needs to connect X. The bot then does, on each run:
+A new owner only needs to connect X. The bot then does, on each run (since 3.1.0 steps 5 to 10 are done by `tools/fill_data.py`, see above; the list stays as the reference for what the script does):
 
 1. **Fetch the renderer** from the raw URL above (once; keep the text, you only ever swap the `DATA` block).
 2. **Who am I.** `get_users_me` with `user.fields=public_metrics,profile_image_url,...` → `id`, `name`, `username`, current follower count, avatar URL. Read the owner's IANA time zone (for example from the bot's memory or settings) into `tz.iana`; if it is unknown, ask once, do not guess a fixed offset.
@@ -123,6 +128,47 @@ Behaviour worth knowing: items with no data (no status, no baseline, no name…)
 - **X API quota.** The bot's X access is metered per user (about 1000 calls per day, 30 per minute): fetch the owner's posts once per day (paging with `next_token`), do not poll, and keep earlier days' compact rows in the bot's own memory instead of fetching them again.
 - **Accessibility.** With `prefers-reduced-motion: reduce` playback does not start by itself, dial shake, finale flash and the status shimmer / ripples are off. Music is always off until clicked. The toolbar buttons are real buttons (keyboard focusable), the dial and the progress slider carry labels, and the main numbers use light text on the dark stage (dimmer colours are only for secondary labels).
 
+## Building the page with `fill_data.py` (v3.1)
+
+Since 3.1.0 the bot no longer builds `DATA` by hand. Steps 5 to 10 of the flow below (classify, metrics, followers, status, DATA, size budget) are done by one script that uses only the Python standard library and `zoneinfo`:
+
+```
+python3 tools/fill_data.py input.json --out page.tsx [--min dist/x-pulse-replay.min.tsx] [--max-bytes 205000]
+```
+
+`dist/x-pulse-replay.min.tsx` is the renderer with comments and indentation removed (identifiers untouched, `BEGIN DATA` / `END DATA` markers kept), about 68 % of the source size; build it with `python3 tools/build.py` (add `--typecheck` to type-check the minified output too). `page.tsx` is the final file: pass its content inline to `WriteCanvas` (or `EditCanvas` on the existing canvas).
+
+**Input JSON** (what the bot saves after fetching):
+
+```
+{
+  "lang": "zh",                                  // "en" | "zh" (initial UI language; the viewer can switch)
+  "account": { "name": "…", "username": "…" },
+  "avatar": { "size": 64, "palette": "…", "indices": "…" } | null,   // tools/build_avatar.py output
+  "tz": { "iana": "Asia/Shanghai", "label": "Beijing" },            // IANA zone of the owner; label optional
+  "days_requested": 1,                           // 1..7 local calendar days ending YESTERDAY (today is never included)
+  "me_id": "1937489637389533186",
+  "raw_posts": [ { "id", "created_at", "text", "referenced_tweets", "in_reply_to_user_id", "public_metrics" }, … ],
+  "followers_snapshots": [ { "at": "2026-11-01T12:37:00+08:00", "count": 3586 }, … ],
+  "metricsFetchedAt": "2026-11-02T21:16:00+08:00",
+  "status_history": [ { "date": "2026-10-30", "engagement": 812 }, … ]   // optional
+}
+```
+
+Optional keys: `now` (default: system clock), `raw_posts_from` (earliest instant `raw_posts` really covers, so earlier days can feed the status baseline), `snapshot_max_gap_hours` (36), `snapshot_tolerance_minutes` (30), `max_bytes`, `example`.
+
+What it does, and what it will not do:
+
+- **Days.** Local calendar days in `tz.iana` (DST days of 23 / 25 hours, `+05:30` / `+05:45` zones). Posts outside the requested days are ignored; a day with no posts is kept as an empty day.
+- **Classification.** Pure retweets are dropped and counted in `footnotes.retweetsExcluded`; `replied_to` is a reply (self-thread when it answers the owner), else `quoted` is a quote, else a post.
+- **Rows.** `[t, flags, impressions, likes, reposts, replies, quotes, id, snippet]` with `t` = seconds since the local day start, snippets cut to 20 graphemes (leading @mentions and URLs removed), one row per line. A metric the API did not return is `null`, never 0, never estimated.
+- **Follower change** only when the snapshots bracket the day: one at or before 00:00 (or up to 30 minutes after) and one at or after 24:00 (or up to 30 minutes before), each within 36 hours of the boundary. `baselineAt` records which snapshot was used. Otherwise `delta` is `null` and the page shows its localized "no data" text. Nothing is invented.
+- **Day status** (rating footer) only with at least 3 earlier days of engagement to compare with (`status_history`, other requested days, or `raw_posts_from`); otherwise `null` and the footer is hidden. The live centre status word needs no data.
+- **Size budget.** If the page would pass `max_bytes` (default 205,000 bytes; the canvas write limit is about 213 KB), it keeps the top-N posts of every day by engagement + impressions and says how many were left out in `footnotes.extra` (EN and ZH). It never trims silently. The JSON summary printed on stdout lists bytes, per-day counts, `retweets_dropped`, `cap_per_day` and `omitted`.
+- Exit code 2 for bad input, 3 when even zero posts do not fit.
+
+Limits: the minifier keeps every name (no renaming), so the page is about 94 KB before data; 7 days at 300 posts per day is the practical ceiling for one page. X API read quota (30 per minute, 1,000 per day, 25 posts per `get_users_posts` page) applies to fetching.
+
 ## Avatar helper
 
 ```
@@ -139,12 +185,14 @@ Prints (or writes) `{"size":96,"palette":"…","indices":"…"}` (about 12 KB). 
 cd tests && npm install && npm test
 ```
 
-Needs Node 20+, Python 3 with Pillow, and Chrome / Chromium (`CHROME_PATH` to override `/usr/bin/google-chrome`). `npm test` builds a sample avatar, type-checks the renderer (strict) and runs four scripts in headless Chrome:
+Needs Node 20+, Python 3 with Pillow, and Chrome / Chromium (`CHROME_PATH` to override `/usr/bin/google-chrome`). `npm test` builds a sample avatar, type-checks the renderer (strict) and type-checks the minified output too, runs the `fill_data.py` unit tests (day boundaries, DST, +05:45, empty day, missing impressions, cap note, follower bracketing, status baseline) and then runs four scripts in headless Chrome:
 
 - `run.mjs` (about 8 minutes): about 25 scenarios (example data, full data in both languages, zero / one / 600 posts, all-null metrics, first run, very long and emoji names, bad avatar, unsafe URLs, bad window, other time zones…), each also switching every music style, scrubbing, pausing and changing speed, then rendering the music offline; fails on any page error, network request or `NaN` / `undefined` in the page.
 - `lang.mjs`: language seeding (`en`, `zh`, missing, unknown, `zh-CN`), switching by button and `L`, no leftover other-language words in the page or on the canvas, notes, `localStorage` rules (including a denied or corrupt store), layout at 1:1, 9:16, 16:9 and 390 px wide, screenshots in `tests/out/lang/`.
 - `days.mjs`: day boundaries for 15 zone / date cases (DST 23 h / 25 h, +05:30, +05:45, +14, −12, a 30-minute DST shift, a skipped midnight), tick counts, local-day bucketing around midnight and the repeated hour, chips and day switching at three widths, relative-time rows, legacy data, error messages, grapheme cutting, size numbers and frame rate for 7 days × 300 posts.
 - `dash.mjs`: live status at calm / busy / peak moments in both languages and all three ratios, level changes during real playback, centre-dashboard screenshots in `tests/out/dash/`.
+
+`node page.mjs page.tsx [outdir] [lang]` renders any finished page file (for example the output of `fill_data.py`) in headless Chrome, fails on page errors, network requests or `NaN` / `undefined`, and saves start / middle / end screenshots.
 
 All scenario data is synthetic.
 
@@ -171,14 +219,19 @@ The code comments are in English; the page itself is bilingual.
 
 ```
 renderer/x-pulse-replay.tsx   页面（DATA 数据块 + 渲染器）
-tools/build_avatar.py         头像图片 -> 96x96、64 色的 DATA.avatar 数据块
-tests/                        无头 Chrome 测试（可选）：run.mjs、lang.mjs、days.mjs、dash.mjs
+dist/x-pulse-replay.min.tsx   同一个渲染器的压缩版（bot 实际写入的内容）
+tools/build.py                渲染器 -> dist 压缩版（tools/minify，TypeScript 5 编译器 API），--typecheck
+tools/fill_data.py            X API 原始数据 -> 最终页面文件（仅标准库 + zoneinfo）
+tools/build_avatar.py         头像图片 -> DATA.avatar 用的小调色板头像块
+tests/                        无头 Chrome 测试（可选）：run.mjs、lang.mjs、days.mjs、dash.mjs、page.mjs；test_fill_data.py
 ```
 
 Bot 取文件用的稳定原始链接（`main` 分支）：
 
 ```
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/renderer/x-pulse-replay.tsx
+https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/dist/x-pulse-replay.min.tsx
+https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/fill_data.py
 https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avatar.py
 ```
 
@@ -208,7 +261,7 @@ https://raw.githubusercontent.com/topmindspace/x-pulse-bot/main/tools/build_avat
 
 ## 在 Grok Bot 里怎么用（完整流程）
 
-新用户只需要连接 X。之后每次运行 bot 这样做：
+新用户只需要连接 X。之后每次运行 bot 这样做（3.1.0 起第 5 到 10 步由 `tools/fill_data.py` 完成，见上；这个列表保留，用来说明脚本做了什么）：
 
 1. **取渲染器**：从上面的原始链接下载一次，之后只替换 `DATA` 块，其余不动。
 2. **我是谁**：`get_users_me`，`user.fields=public_metrics,profile_image_url,…`，得到 `id`、`name`、`username`、当前粉丝数和头像 URL。把用户的 IANA 时区（例如来自 bot 的记忆或设置）填进 `tz.iana`；不知道就问一次，不要猜一个固定偏移。
@@ -263,6 +316,47 @@ Bot 守则：除非在改渲染器本身，否则不要改 DATA 块以外的任�
 - **X API 配额。** bot 的 X 访问按用户计量（约每天 1000 次、每分钟 30 次）：每天只取一次用户的帖子（用 `next_token` 翻页），不要轮询，更早几天的紧凑数据存在 bot 自己的记忆里，不再重复获取。
 - **无障碍。** 开启 `prefers-reduced-motion: reduce` 时不会自动播放，表盘震动、结尾闪光、状态扫光和涟漪都会关闭。音乐始终要点击后才开。工具栏按钮都是真正的按钮（可用键盘聚焦），表盘和进度条带有标签，主要数字在深色舞台上用浅色文字（较暗的颜色只用于次要标签）。
 
+## 用 `fill_data.py` 生成页面（v3.1）
+
+3.1.0 起 bot 不再手工拼 `DATA`。下面流程里的第 5 到 10 步（分类、指标、关注变化、评级、DATA、体积预算）由一个只用 Python 标准库和 `zoneinfo` 的脚本完成：
+
+```
+python3 tools/fill_data.py input.json --out page.tsx [--min dist/x-pulse-replay.min.tsx] [--max-bytes 205000]
+```
+
+`dist/x-pulse-replay.min.tsx` 是去掉注释和缩进的渲染器（标识符不改名，保留 `BEGIN DATA` / `END DATA` 标记），体积约为源文件的 68 %；用 `python3 tools/build.py` 生成（加 `--typecheck` 会同时对压缩后的文件做类型检查）。`page.tsx` 就是最终文件：把内容原样交给 `WriteCanvas`（或对已有画布用 `EditCanvas`）。
+
+**输入 JSON**（bot 取完数据后保存）：
+
+```
+{
+  "lang": "zh",                                  // "en" | "zh"（页面初始语言，观看者可切换）
+  "account": { "name": "…", "username": "…" },
+  "avatar": { "size": 64, "palette": "…", "indices": "…" } | null,   // tools/build_avatar.py 的输出
+  "tz": { "iana": "Asia/Shanghai", "label": "北京" },               // 用户的 IANA 时区；label 可选
+  "days_requested": 1,                           // 1..7 个自然日，截止到昨天（不含今天）
+  "me_id": "1937489637389533186",
+  "raw_posts": [ { "id", "created_at", "text", "referenced_tweets", "in_reply_to_user_id", "public_metrics" }, … ],
+  "followers_snapshots": [ { "at": "2026-11-01T12:37:00+08:00", "count": 3586 }, … ],
+  "metricsFetchedAt": "2026-11-02T21:16:00+08:00",
+  "status_history": [ { "date": "2026-10-30", "engagement": 812 }, … ]   // 可选
+}
+```
+
+可选键：`now`（默认系统时钟）、`raw_posts_from`（`raw_posts` 实际覆盖的最早时刻，更早的日子可用于评级基线）、`snapshot_max_gap_hours`（36）、`snapshot_tolerance_minutes`（30）、`max_bytes`、`example`。
+
+它做什么，不做什么：
+
+- **日期**：按 `tz.iana` 的当地自然日（夏令时 23 / 25 小时、`+05:30` / `+05:45` 时区都支持）。请求日之外的帖子忽略；没有帖子的日子保留为空日。
+- **分类**：纯转推丢弃并计入 `footnotes.retweetsExcluded`；含 `replied_to` 为回帖（回复自己时标记续写），否则含 `quoted` 为引用，其余为发帖。
+- **数据行**：`[t, flags, 曝光, 赞, 转发, 回复, 引用, id, 摘要]`，`t` 为距当地 0 点的秒数，摘要最多 20 个字素（去掉开头的 @ 和链接），每行一条。API 没返回的指标是 `null`，不写 0，不估算。
+- **关注变化**只在快照前后包住这一天时才给出：一个在 0 点或之前（或 0 点后 30 分钟内），一个在 24 点或之后（或 24 点前 30 分钟内），且各离边界不超过 36 小时。`baselineAt` 记录用了哪个快照；否则 `delta` 为 `null`，页面显示本地化的“无数据”文字。不会编造。
+- **当日评级**（页脚）至少要有 3 天更早的互动数据做对比（`status_history`、其他请求日或 `raw_posts_from`），否则为 `null`，页脚不显示。中心的实时状态词不需要任何数据。
+- **体积预算**：页面超过 `max_bytes`（默认 205,000 字节；画布写入上限约 213 KB）时，按“互动 + 曝光”每天保留前 N 条，并在 `footnotes.extra`（中英）写明省略了多少条，绝不悄悄裁剪。标准输出的 JSON 摘要含字节数、每天条数、`retweets_dropped`、`cap_per_day`、`omitted`。
+- 退出码：2 输入有误，3 连 0 条帖子也放不下。
+
+限制：压缩器不改名，所以不含数据时页面约 94 KB；一页的实际上限约为 7 天 × 每天 300 条。取数时仍受 X API 读取配额限制（每分钟 30 次、每天 1,000 次、`get_users_posts` 每页 25 条）。
+
 ## 头像工具
 
 ```
@@ -279,12 +373,14 @@ python3 tools/build_avatar.py ./me.png --size 96 --colors 64
 cd tests && npm install && npm test
 ```
 
-需要 Node 20+、带 Pillow 的 Python 3、Chrome / Chromium（用 `CHROME_PATH` 覆盖默认的 `/usr/bin/google-chrome`）。`npm test` 会生成示例头像、对渲染器做严格类型检查，并在无头 Chrome 里运行四个脚本：
+需要 Node 20+、带 Pillow 的 Python 3、Chrome / Chromium（用 `CHROME_PATH` 覆盖默认的 `/usr/bin/google-chrome`）。`npm test` 会生成示例头像、对渲染器做严格类型检查，同时检查压缩后的文件，运行 `fill_data.py` 的单元测试（日界线、夏令时、+05:45、空日、缺失曝光、裁剪说明、关注快照包围规则、评级基线），再在无头 Chrome 里运行四个脚本：
 
 - `run.mjs`（约 8 分钟）：约 25 个场景（示例数据、中英文完整数据、零 / 一 / 600 条帖子、指标全缺失、首次运行、超长和 emoji 名称、坏头像、不安全链接、坏窗口、其他时区等），每个场景还会切换所有音乐风格、拖动、暂停、变速并离线渲染音乐；出现页面错误、网络请求或页面里的 `NaN` / `undefined` 都算失败。
 - `lang.mjs`：语言初始化（`en`、`zh`、缺失、未知、`zh-CN`）、按钮和 `L` 键切换、页面和画布上没有另一种语言的残留词、备注、`localStorage` 规则（包括被拒绝或损坏的存储）、1:1、9:16、16:9 和 390 px 宽下的布局，截图在 `tests/out/lang/`。
 - `days.mjs`：15 个时区 / 日期的日界线（夏令时 23 / 25 小时、+05:30、+05:45、+14、−12、30 分钟夏令时偏移、被跳过的午夜）、刻度数量、午夜前后和重复小时的当地日归档、三种宽度下的日期按钮与切换、相对时间行、旧数据、错误提示、字素截断，以及 7 天 × 300 条的体积和帧率。
 - `dash.mjs`：中英文、三种画幅下静候 / 繁忙 / 峰值时刻的实时状态、真实播放中的级别变化，以及中心看板截图（`tests/out/dash/`）。
+
+`node page.mjs page.tsx [输出目录] [语言]` 会在无头 Chrome 里渲染任何成品页面文件（例如 `fill_data.py` 的输出），出现页面错误、网络请求或 `NaN` / `undefined` 即失败，并保存开头 / 中段 / 结尾截图。
 
 所有场景数据均为虚构。
 

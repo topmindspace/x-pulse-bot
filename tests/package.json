@@ -1,14 +1,14 @@
 {
   "name": "x-pulse-tests",
   "private": true,
-  "version": "1.2.0",
-  "description": "Headless-Chrome tests (smoke, language, days / time zones, live status), minified-output typecheck and fill_data.py unit tests for renderer/x-pulse-replay.tsx",
+  "version": "1.3.0",
+  "description": "Headless-Chrome tests (smoke, language, days / time zones, live status, public edition), minified-output typecheck and fill_data.py unit tests for renderer/x-pulse-replay.tsx",
   "scripts": {
     "avatar": "python3 make_sample_avatar.py",
     "typecheck": "mkdir -p src && cp ../renderer/x-pulse-replay.tsx src/replay.tsx && tsc -p .",
     "typecheck:min": "python3 ../tools/build.py --typecheck",
-    "test:py": "python3 test_fill_data.py",
-    "test": "npm run avatar && npm run typecheck && npm run typecheck:min && npm run test:py && node run.mjs && node lang.mjs && node days.mjs && node dash.mjs && node mode.mjs"
+    "test:py": "python3 test_fill_data.py && python3 -W ignore test_public.py",
+    "test": "npm run avatar && npm run typecheck && npm run typecheck:min && npm run test:py && node run.mjs && node lang.mjs && node days.mjs && node dash.mjs && node mode.mjs && node public.mjs"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",

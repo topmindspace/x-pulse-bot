@@ -1,0 +1,59 @@
+{
+ "version": 1,
+ "calibrated": "2026-11-03",
+ "tag": "2026-11-03T04",
+ "window": [
+  "2026-11-02T04:00:00Z",
+  "2026-11-03T04:00:00Z"
+ ],
+ "topic_keywords": "see config.sets",
+ "method": "posts per person = 1 / mean(1/n_i) over authors of randomly sampled posts; n_i = that author's matching posts in the window (count API, granularity day); zero counts are treated as 1",
+ "posts_per_author": 2.0,
+ "replies_per_commenter": 2.7,
+ "kinds": {
+  "pq": {
+   "n_authors": 10,
+   "counts": [
+    63,
+    1,
+    4,
+    1,
+    22,
+    1,
+    1,
+    10,
+    7,
+    2
+   ],
+   "mean_inverse": 0.5054,
+   "per_person": 1.979,
+   "ci90": [
+    1.37,
+    3.55
+   ],
+   "zero_counts": 0
+  },
+  "rep": {
+   "n_authors": 10,
+   "counts": [
+    142,
+    76,
+    3,
+    47,
+    3,
+    0,
+    0,
+    2768,
+    0,
+    34
+   ],
+   "mean_inverse": 0.3738,
+   "per_person": 2.675,
+   "ci90": [
+    1.66,
+    5.78
+   ],
+   "zero_counts": 3
+  }
+ }
+}

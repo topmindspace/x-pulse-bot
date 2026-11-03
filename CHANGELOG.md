@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.3.0 (2026-11-03)
+
+X Pulse (Public) is real: the renderer draws the topic-heat dial, and `public/` holds the data chain, the video recorder and the tests. No change to the Personal DATA schema (v3); old Personal data renders as before, every Personal path is unchanged.
+
+- **Public mode in the shared renderer.** `DATA.mode = "public"` takes `topic{name,title{zh,en}}`, `tz`, `window`, `posts` rows (`id: null` = scaled dot), `followers.segments`, `footnotes` and `pub{N,M,cardHours,hours,cum,totals,hot,scope,caveat}`. Strict validation with `DATA.pub.…` messages. Three layouts (wide 16:9 with sidebar, square, stack), EN / 中文 switch, same effects and music as Personal. The centre board counts up with the playhead and ends on the sidebar totals. **No 「估」 / "est." in the dial, centre board or bars**: the caveat is in the sidebar (`data-xp-caveat`) and the page footnotes only.
+- **Recorder hooks** `window.__XPULSE_REC` (layout, frame width) and `window.__XPULSE_API` / `__XPULSE_ME` for the 16:9 and 1:1 videos.
+- **`public/`**: `config.json`, `fetch_plan.py` (≤ 25 X calls, queries archived), `ingest.py`, `calibrate_people.py` (people ratios measured on X, with a bootstrap 90% interval), `db_hot.py` (optional), `gloss.py` (hot-post translations, exit 4 if missing), `fill_public.py` (self-checks), `make_public.sh` + `video/` (deterministic 30 fps frames, offline music, ffmpeg loudnorm, 1920×1080 and 1080×1080). README in EN and 中文.
+- **Data-chain fixes** found in the full review: people ratios came from tracked power users (now measured on X); retweets = all − originals − replies − quotes is clamped at 0 per hour and reported; the display time zone and the random seed (sha256 of tag and topic) are real and fixed; a slot bug in `ingest.py`; query text is archived with every plan; dot weights are scaled so the dots add up to the totals.
+- **Shared-renderer fixes (also benefit Personal):** a false "24:00" in the date/time helpers for windows that end at a time other than midnight; `tzLabel()` accepts `{zh,en}`; no JSX fragments (`display: contents` wrappers); refactored name / handle / kind helpers and one `DAYS` builder. Personal output is unchanged (`mode.mjs`, `run.mjs`, `lang.mjs`, `days.mjs`, `dash.mjs` pass).
+- **Tests.** `tests/public.mjs` (validation messages, EN / 中文, no 估 / est. over 5 layouts × 2 languages × 3 positions on canvas text and DOM, panel overflow and font floor, centre board = sidebar totals, hot card, recorder hook) and `tests/test_public.py` (21 tests: config, fill invariants, exit codes, clamp, determinism, people maths, aggregates-only injection, bilingual gloss); `tests/pubfix.py` builds a synthetic cache. `npm test` runs both. `tests/mode.mjs` follows the new public shape.
+- Known limits: with fewer than 40 sampled posts in a stratum the p97.5 winsor does not clip; people ratios rest on 10 authors per kind (wide range, shown); a hot post whose own text contains 「估」 shows it.
+
 ## 3.2.0 (2026-11-03)
 
 One repo, two editions, one renderer. No change to the Personal DATA schema (v3); old data without `mode` renders exactly as before.

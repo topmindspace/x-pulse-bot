@@ -3,8 +3,9 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 
 // =====================================================================================================
 // X Pulse · daily replay renderer (generic, data-free)
-// Renderer version 3.2.0 (2026-11-03): two editions in one renderer, selected by DATA.mode ("personal" default, or "public", reserved).
+// Renderer version 3.3.0 (2026-11-03): two editions in one renderer, selected by DATA.mode ("personal" default, or "public").
 // Personal: 1-7 calendar days in the owner's IANA time zone (DST-aware), date chips, slim compact posts, in-page EN / 中文 switch.
+// Public: topic-wide heat of the last 24 hours (aggregates, scaled sample dots and a few real hot posts), same dial and centre board, bilingual side panels.
 // Bump this line when the renderer changes.
 //
 // This file is a READ-ONLY, NO-NETWORK canvas page. Everything it shows comes from the single DATA object
@@ -15,8 +16,7 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 //
 // DATA schema v3 (see README.md for the full description):
 //   mode        "personal" | "public"            Edition. Missing => "personal" (all v2 / v3 data keeps working unchanged). Anything else is an error text.
-//                                                "public" is RESERVED / DRAFT: only { mode, lang, example?, topic: { name }, footnotes? } is validated and the page
-//                                                shows a placeholder with the title "X Pulse · Public · <topic.name>"; the real public data format is defined later.
+//                                                "public": topic-wide heat of one 24-hour window, see "DATA schema, public edition" below and public/README.md.
 //   lang        "en" | "zh"                      Initial UI language (the owner's Grok Bot language; missing/unknown => "en"). The viewer can switch EN / 中文 on the page.
 //   example     boolean                          true => placeholder data; the page says so in subtitle and footer.
 //   account     { name, username }               display name and handle (with or without a leading "@").
@@ -46,6 +46,21 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 //                 metricsFetchedAt ISO time or null (also decides which day counts as "Yesterday"); retweetsExcluded number or null;
 //                 extra = (string | { en?, zh? })[] (plain strings are always shown).
 // Legacy v2 DATA (window { startISO, endISO, tz{label, offsetMinutes} }, posts, followers, status at top level) still renders as one day.
+//
+// DATA schema, public edition (mode "public"; written by public/fill_public.py, never by hand):
+//   topic       { name, title? }                 name = short topic id; title = string or { zh, en } shown in headlines.
+//   tz          { iana, label? }                 label may be a string or { zh, en }.
+//   window      { startISO, endISO, tz? }        the 24-hour window (any start hour); the dial's top is the window start.
+//   posts       compact rows as above, offsets in seconds from the window start. SCALED SAMPLE DOTS carry no id (1 dot = pub.N posts);
+//               REAL hot posts carry an id and count as 1 post each.
+//   followers   { current, delta, segments }     only used for the comets: delta = number of comets (1 comet = pub.M posters), segments place them in time.
+//   pub         { N, M, cardHours,
+//                 hours { posts[24], reposts[24], tier[24] }      per window hour: post count, reposts, heat level 0..4
+//                 cum   { posters[25], commenters[25], reposts[25] }  cumulative at each hour boundary (the centre board interpolates)
+//                 totals { orig, reply, quote, reposts, views, viewsLow, viewsHigh, engagement, posters, commenters, postersLow, postersHigh, commentersLow, commentersHigh }
+//                 hot   [{ id, u, ts, v, l, r, lang, title, gloss { zh?, en? } }]   <= 12 real posts, ts in seconds from the window start
+//                 scope { zh, en }  caveat { zh, en } }        scope = what is counted; caveat = how the numbers were obtained (shown ONLY in the sidebar and footnote)
+// The centre board scales the running sums of the dots so that the end of the turn equals pub.totals exactly. No string in the dial, centre board or bars says "estimated".
 // =====================================================================================================
 
 type Num = number | null;
@@ -65,12 +80,13 @@ interface StatusIn {
 }
 interface TzIn {
   iana?: string;
-  label?: string;
+  label?: string | { zh?: string; en?: string };
   offsetMinutes?: number;
 }
 interface Data {
-  mode?: string; // "personal" (default when missing) | "public" (reserved)
-  topic?: { name: string; [k: string]: unknown }; // public edition only (reserved / draft)
+  mode?: string; // "personal" (default when missing) | "public"
+  topic?: { name: string; title?: unknown; [k: string]: unknown }; // public edition
+  pub?: unknown; // public edition aggregates, validated by parsePub()
   lang: string;
   example: boolean;
   account?: { name: string; username: string }; // personal edition (required there; checked below)
@@ -121,7 +137,7 @@ function normLang(x: unknown): Lang {
   return typeof x === "string" && x.toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
 }
 const LANG0: Lang = normLang(DATA.lang);
-// Edition: missing mode => personal. "public" is reserved (placeholder page only, see publicError()).
+// Edition: missing mode => personal.
 const MODE_RAW: unknown = DATA.mode;
 const MODE: "personal" | "public" = typeof MODE_RAW === "string" && MODE_RAW.trim().toLowerCase() === "public" ? "public" : "personal";
 const MODE_ERR: string | null =
@@ -129,9 +145,118 @@ const MODE_ERR: string | null =
     ? null
     : "DATA.mode must be \"personal\" or \"public\"";
 const TOPIC: string = DATA.topic && typeof DATA.topic.name === "string" ? DATA.topic.name.trim() : "";
-// Minimal validation of the reserved public shape: a topic name is required, nothing else.
+// ---------- public edition data (DATA.pub); validated here, drawn by the shared dial and the panels below ----------
+type Bi = { zh: string; en: string };
+interface PubHot {
+  id: string;
+  u: string;
+  ts: number;
+  v: number;
+  l: number;
+  r: number;
+  lang: string;
+  title: string;
+  gloss: { zh?: string; en?: string };
+}
+interface PubD {
+  N: number; // 1 scaled dot = N posts
+  M: number; // 1 comet = M posters
+  cardHours: number;
+  hp: number[]; // posts per hour (24)
+  hr: number[]; // reposts per hour (24)
+  tier: number[]; // 0..4 per hour (24)
+  cPost: number[]; // cumulative posters (25)
+  cCom: number[]; // cumulative commenters (25)
+  cRt: number[]; // cumulative reposts (25)
+  t: Record<string, number>;
+  hot: PubHot[];
+  scope: Bi;
+  caveat: Bi;
+}
+const isObj = (x: unknown): x is Record<string, unknown> => x !== null && typeof x === "object" && !Array.isArray(x);
+function numArr(x: unknown, n: number, mono: boolean): number[] | null {
+  if (!Array.isArray(x) || x.length !== n) return null;
+  const o: number[] = [];
+  for (const v of x) {
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return null;
+    if (mono && o.length > 0 && v < o[o.length - 1]) return null;
+    o.push(v);
+  }
+  return o;
+}
+function biStr(x: unknown): Bi | null {
+  if (typeof x === "string" && x.trim() !== "") return { zh: x, en: x };
+  if (isObj(x)) {
+    const zh = typeof x.zh === "string" ? x.zh : "";
+    const en = typeof x.en === "string" ? x.en : "";
+    if (zh !== "" || en !== "") return { zh: zh !== "" ? zh : en, en: en !== "" ? en : zh };
+  }
+  return null;
+}
+const PUB_TOT = ["orig", "reply", "quote", "reposts", "views", "viewsLow", "viewsHigh", "engagement", "posters", "commenters", "postersLow", "postersHigh", "commentersLow", "commentersHigh"];
+function parsePub(): { p: PubD | null; err: string | null } {
+  const raw = (DATA as { pub?: unknown }).pub;
+  const bad = (m: string) => ({ p: null, err: "DATA.pub." + m });
+  if (!isObj(raw)) return { p: null, err: "DATA.pub is required when DATA.mode is \"public\"" };
+  const pos = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x) && x >= 1;
+  if (!pos(raw.N)) return bad("N must be a number >= 1 (1 dot = N posts)");
+  if (!pos(raw.M)) return bad("M must be a number >= 1 (1 comet = M posters)");
+  const ch = typeof raw.cardHours === "number" && Number.isFinite(raw.cardHours) && raw.cardHours > 0 && raw.cardHours <= 6 ? raw.cardHours : 1.9;
+  const hours = isObj(raw.hours) ? raw.hours : {};
+  const hp = numArr(hours.posts, 24, false);
+  const hr = numArr(hours.reposts, 24, false);
+  const tier = numArr(hours.tier, 24, false);
+  if (hp === null) return bad("hours.posts must be 24 non-negative numbers");
+  if (hr === null) return bad("hours.reposts must be 24 non-negative numbers");
+  if (tier === null || tier.some((x) => x > 4 || Math.floor(x) !== x)) return bad("hours.tier must be 24 integers 0..4");
+  const cum = isObj(raw.cum) ? raw.cum : {};
+  const cPost = numArr(cum.posters, 25, true);
+  const cCom = numArr(cum.commenters, 25, true);
+  const cRt = numArr(cum.reposts, 25, true);
+  if (cPost === null || cCom === null || cRt === null) return bad("cum.posters / cum.commenters / cum.reposts must be 25 non-decreasing non-negative numbers");
+  const tt = isObj(raw.totals) ? raw.totals : {};
+  const t: Record<string, number> = {};
+  for (const k of PUB_TOT) {
+    const v = tt[k];
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return bad("totals." + k + " must be a non-negative number");
+    t[k] = v;
+  }
+  const hot: PubHot[] = [];
+  if (raw.hot !== undefined && !Array.isArray(raw.hot)) return bad("hot must be an array");
+  for (const h of (raw.hot ?? []) as unknown[]) {
+    if (!isObj(h) || typeof h.id !== "string" || !/^\d{1,25}$/.test(h.id) || typeof h.ts !== "number" || !(h.ts >= 0 && h.ts <= 86400) || typeof h.title !== "string") return bad("hot[] items need id (digits), ts (seconds from the window start) and title");
+    const g = isObj(h.gloss) ? h.gloss : {};
+    const n = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : 0);
+    hot.push({ id: h.id, u: typeof h.u === "string" ? h.u : "", ts: h.ts, v: n(h.v), l: n(h.l), r: n(h.r), lang: h.lang === "zh" ? "zh" : "en", title: h.title, gloss: { zh: typeof g.zh === "string" ? g.zh : undefined, en: typeof g.en === "string" ? g.en : undefined } });
+  }
+  if (hot.length > 12) return bad("hot may hold at most 12 posts");
+  hot.sort((a, b) => a.ts - b.ts);
+  const scope = biStr(raw.scope);
+  const caveat = biStr(raw.caveat);
+  if (scope === null) return bad("scope must be a string or { zh, en }");
+  if (caveat === null) return bad("caveat must be a string or { zh, en }");
+  return { p: { N: raw.N, M: raw.M, cardHours: ch, hp, hr, tier, cPost, cCom, cRt, t, hot, scope, caveat }, err: null };
+}
+const PUB_R: { p: PubD | null; err: string | null } = MODE === "public" ? parsePub() : { p: null, err: null };
+const PUB: PubD | null = PUB_R.p;
+// Topic title in the current language (DATA.topic.title as a string or { zh, en }, falling back to topic.name)
+function topicTitle(): string {
+  const t = (DATA.topic as { title?: unknown } | undefined)?.title;
+  if (typeof t === "string" && t.trim() !== "") return t.trim();
+  if (isObj(t)) {
+    const a = t[LANG];
+    const b = t[LANG === "zh" ? "en" : "zh"];
+    if (typeof a === "string" && a.trim() !== "") return a.trim();
+    if (typeof b === "string" && b.trim() !== "") return b.trim();
+  }
+  return TOPIC;
+}
 function publicError(): string | null {
-  return TOPIC === "" ? "DATA.topic.name is required when DATA.mode is \"public\"" : null;
+  if (TOPIC === "") return "DATA.topic.name is required when DATA.mode is \"public\"";
+  if (PUB_R.err !== null) return PUB_R.err;
+  if (TZ_ERR !== null) return TZ_ERR;
+  if (DAYS.length === 0) return "DATA.window.startISO is missing or not a date";
+  return null;
 }
 let LANG: Lang = LANG0;
 function tx(zh: string, en: string): string {
@@ -176,7 +301,10 @@ const REDUCED: boolean = (() => {
   }
 })();
 const KIND_OF: Record<string, number> = { post: 0, reply: 1, quote: 2 };
-const kindName = (i: number): string => [tx("发帖", "Posts"), tx("回复", "Replies"), tx("引用", "Quotes")][i];
+const kindName = (i: number): string => (MODE === "public" ? [tx("原创", "Posts"), tx("评论", "Replies"), tx("引用", "Quotes")][i] : [tx("发帖", "Posts"), tx("回复", "Replies"), tx("引用", "Quotes")][i]);
+// Account name / handle line in the centre. Public: the topic headline and the dot scale.
+const nameStr = (): string => (MODE === "public" ? topicTitle() : NAME);
+const handleStr = (): string => (MODE === "public" && PUB !== null ? tx("1 点 ≈ " + fmtC(PUB.N) + " 帖", "1 dot ≈ " + fmtC(PUB.N) + " posts") : HANDLE);
 const SAFE_URL = /^https:\/\/(x|twitter)\.com\//;
 const NAME = typeof DATA.account?.name === "string" ? DATA.account.name.trim() : "";
 const USERNAME = typeof DATA.account?.username === "string" ? DATA.account.username.trim().replace(/^@+/, "") : "";
@@ -208,7 +336,19 @@ if (typeof TZ_IN.iana === "string" && TZ_IN.iana !== "") {
 } else {
   TZ_ERR = "DATA.tz.iana is missing (for example \"Asia/Shanghai\")";
 }
-const TZ_LABEL: string = typeof TZ_IN.label === "string" && TZ_IN.label !== "" ? TZ_IN.label : TZ_FMT !== null ? (TZ_IN.iana as string) : "UTC" + (TZ_FIXED < 0 ? "−" : "+") + pad2(Math.floor(Math.abs(TZ_FIXED) / 3600)) + ":" + pad2(Math.round((Math.abs(TZ_FIXED) % 3600) / 60));
+const TZ_LABEL0: string = TZ_FMT !== null ? (TZ_IN.iana as string) : "UTC" + (TZ_FIXED < 0 ? "−" : "+") + pad2(Math.floor(Math.abs(TZ_FIXED) / 3600)) + ":" + pad2(Math.round((Math.abs(TZ_FIXED) % 3600) / 60));
+// Display name of the zone: a string, or { zh, en } picked by the current language (public edition), else the IANA name / UTC offset
+function tzLabel(): string {
+  const l = TZ_IN.label;
+  if (typeof l === "string" && l !== "") return l;
+  if (l !== null && typeof l === "object") {
+    const a = l[LANG];
+    const b = l[LANG === "zh" ? "en" : "zh"];
+    if (typeof a === "string" && a !== "") return a;
+    if (typeof b === "string" && b !== "") return b;
+  }
+  return TZ_LABEL0;
+}
 // Local wall-clock parts of a unix instant in the owner's zone
 function lparts(utcS: number): LP {
   const sec = Math.floor(utcS);
@@ -340,7 +480,7 @@ function buildDays(): DayM[] {
   }
   return out;
 }
-const DAYS: DayM[] = MODE === "personal" ? buildDays() : [];
+const DAYS: DayM[] = buildDays();
 const BAD_DATA: string | null =
   MODE_ERR !== null ? MODE_ERR
   : MODE === "public" ? publicError()
@@ -378,9 +518,9 @@ const wday = (a: [number, number, number]): string => {
   }
 };
 // Corner title by edition. Personal: "X Pulse · Personal · @handle · <day label>"; public: "X Pulse · Public · <topic name>".
-// (In the public edition the dial, centre board and bar charts never carry an "estimate" word; caveats go to the footnote text only.)
+// (In the public edition the dial, centre board and bar charts never carry an "estimate" word; caveats go to the sidebar caveat and the footnote only.)
 function pageTitle(date: string): string {
-  if (MODE === "public") return ["X Pulse", "Public", TOPIC].filter((x) => x !== "").join(" · ");
+  if (MODE === "public") return ["X Pulse", "Public", topicTitle()].filter((x) => x !== "").join(" · ");
   const label = DAYS.length > 1 ? tx("每日回放", "Daily replay") : IS_YDAY ? tx("昨日回放", "Yesterday's replay") : tx(date + " 回放", "Replay of " + date);
   return ["X Pulse", "Personal", HANDLE, label].filter((x) => x !== "").join(" · ");
 }
@@ -446,11 +586,17 @@ const VIS_TRUE: Vis = { avatar: true, status: true, posts: true, handle: true, n
 let AVAIL: Vis = VIS_TRUE;
 let VIS_TOTAL = 0;
 const VIS_NONE: Vis = { avatar: false, status: false, posts: false, handle: false, name: false, follow: false, fans: false, imp: false, eng: false, text: false, legend: false, time: false, foot: false };
-const visGroups = (): { title: string; items: [keyof Vis, string][] }[] => [
+const visGroupsP = (): { title: string; items: [keyof Vis, string][] }[] => [
   { title: tx("身份", "Identity"), items: [["avatar", tx("头像", "Avatar")], ["name", tx("账号名「" + NAME + "」", "Name “" + NAME + "”")], ["handle", tx("用户名 ", "Handle ") + HANDLE]] },
   { title: tx("核心指标", "Metrics"), items: [["follow", tx("关注变化", "Follower change")], ["fans", tx("粉丝数", "Followers")], ["imp", tx("曝光数", "Impressions")], ["eng", tx("互动数", "Engagement")], ["posts", tx("发帖/回复/引用条数", "Posts / replies / quotes")], ["status", tx("实时状态与当日评级", "Live status and day rating")]] },
   { title: tx("画面元素", "Elements"), items: [["text", tx("帖子文字", "Post text")], ["legend", tx("图例", "Legend")], ["time", tx("时间刻度与当前时间", "Time ticks and clock")], ["foot", tx("脚注", "Footnotes")]] },
 ].map((g) => ({ title: g.title, items: g.items.filter((it) => AVAIL[it[0] as keyof Vis]) as [keyof Vis, string][] }));
+const visGroupsPub = (): { title: string; items: [keyof Vis, string][] }[] => [
+  { title: tx("身份", "Identity"), items: [["avatar", tx("中心徽标", "Centre badge")], ["name", tx("话题名", "Topic name")], ["handle", tx("缩放比例", "Dot scale")]] },
+  { title: tx("核心指标", "Metrics"), items: [["follow", tx("评论人", "Commenters")], ["fans", tx("发帖人与彗星", "Posters and comets")], ["imp", tx("浏览数", "Views")], ["eng", tx("互动与转推", "Engagement and reposts")], ["posts", tx("原创 / 评论 / 引用条数", "Posts / replies / quotes")], ["status", tx("实时热度词", "Live heat word")]] },
+  { title: tx("画面元素", "Elements"), items: [["text", tx("热帖文字", "Hot-post text")], ["legend", tx("侧栏与卡片", "Side panels and cards")], ["time", tx("时间刻度与当前时间", "Time ticks and clock")], ["foot", tx("页脚说明", "Footnotes")]] },
+].map((g) => ({ title: g.title, items: g.items.filter((it) => AVAIL[it[0] as keyof Vis]) as [keyof Vis, string][] }));
+const visGroups = (): { title: string; items: [keyof Vis, string][] }[] => (MODE === "public" ? visGroupsPub() : visGroupsP());
 
 interface NodeT {
   idx: number;
@@ -590,13 +736,13 @@ function pad2(n: number): string {
 }
 // Seconds into the selected day -> MM-DD HH:mm(:ss) in the owner's time zone (the end of the day reads 24:00 of the same date)
 function tzDT(off: number, withSec: boolean): string {
-  if (off >= DAY && !withSec) return pad2(DAYS[CUR_DAY].ymd[1]) + "-" + pad2(DAYS[CUR_DAY].ymd[2]) + " 24:00";
+  if (off >= DAY && !withSec && MODE === "personal") return pad2(DAYS[CUR_DAY].ymd[1]) + "-" + pad2(DAYS[CUR_DAY].ymd[2]) + " 24:00";
   const d = lparts(START_S + off);
   const base = pad2(d.mo) + "-" + pad2(d.d) + " " + pad2(d.h) + ":" + pad2(d.mi);
   return withSec ? base + ":" + pad2(d.s) : base;
 }
 function tzHM(off: number): string {
-  if (off >= DAY) return "24:00";
+  if (off >= DAY && MODE === "personal") return "24:00";
   const d = lparts(START_S + off);
   return pad2(d.h) + ":" + pad2(d.mi);
 }
@@ -605,7 +751,7 @@ function fmtIso(iso: string): string {
   if (!Number.isFinite(s)) return iso;
   // a real instant, even when it lies after the day's end (a metrics fetch time the next morning must not show as "24:00")
   const d = lparts(START_S + s);
-  return pad2(d.mo) + "-" + pad2(d.d) + " " + pad2(d.h) + ":" + pad2(d.mi) + " " + TZ_LABEL;
+  return pad2(d.mo) + "-" + pad2(d.d) + " " + pad2(d.h) + ":" + pad2(d.mi) + " " + tzLabel();
 }
 function rgba(c: number[], a: number): string {
   return "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a.toFixed(3) + ")";
@@ -1239,7 +1385,9 @@ function decor(ctx: CanvasRenderingContext2D, st: number, ax: number, ay: number
 
 // ---------- Core board: avatar + name + today's status + rolling metrics ----------
 let FOL0 = 0; // follows that happened before the day start (prorated from the snapshot interval)
-let ROLL = { imp: 0, eng: 0, fol: 0, t: 0 };
+let ROLL = { imp: 0, eng: 0, fol: 0, ea: 0, ec: 0, er: 0, t: 0 };
+// Public: factors that make the end of the turn equal pub.totals exactly (scaled dots carry sampled values)
+let PUB_SC = { imp: 1, eng: 1, n: [1, 1, 1] };
 const TINT: number[][] = [[70, 120, 210], [160, 96, 210], [230, 40, 170]];
 const RING: number[][] = [[150, 205, 255], [255, 214, 150], NEON_CY];
 let AV_W = 0;
@@ -1248,6 +1396,20 @@ let AV_PX: Uint8ClampedArray | null = null;
 let AV_TRIED = false;
 
 function fmtN(x: number): string {
+  if (MODE === "public") return fmtC(x);
+  return String(Math.round(x)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+// Compact numbers for the public edition: 7.28亿 / 216万 / 7.3万 and 728M / 1.62B / 134K
+function fmtC(x: number): string {
+  if (!Number.isFinite(x)) return "0";
+  if (LANG === "zh") {
+    if (x >= 1e8) return (x / 1e8).toFixed(2) + "亿";
+    if (x >= 1e4) return (x / 1e4).toFixed(x >= 1e6 ? 0 : 1) + "万";
+  } else {
+    if (x >= 1e9) return (x / 1e9).toFixed(2) + "B";
+    if (x >= 1e6) return (x / 1e6).toFixed(x >= 1e8 ? 0 : 1) + "M";
+    if (x >= 1e4) return (x / 1e3).toFixed(x >= 1e5 ? 0 : 1) + "K";
+  }
   return String(Math.round(x)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 function ease(a: number, t: number, k: number): number {
@@ -1318,20 +1480,31 @@ function drawAvatar(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: nu
   return true;
 }
 // Running totals up to the hand; followers accrue as particles are absorbed (at 85% of their flight) and settle on the final value after a full turn
-function boardAt(cur: number): { imp: number; eng: number; fol: number; n: number[] } {
+function boardAt(cur: number): { imp: number; eng: number; fol: number; n: number[]; ea: number; ec: number; er: number } {
   let imp = 0;
   let eng = 0;
   const n = [0, 0, 0];
+  const pub = MODE === "public" && PUB !== null;
   for (const x of NODES) {
     if (x.ts > cur) continue;
-    imp += x.v ?? 0;
-    eng += (x.l ?? 0) + (x.r ?? 0) + (x.c ?? 0) + (x.q ?? 0);
-    n[x.kind] += 1;
+    const w = pub && x.url === null ? (PUB as PubD).N : 1; // a scaled dot stands for N posts, a real hot post for itself
+    imp += (x.v ?? 0) * w;
+    eng += ((x.l ?? 0) + (x.r ?? 0) + (x.c ?? 0) + (x.q ?? 0)) * w;
+    n[x.kind] += w;
   }
   let fol = FOL0;
   if (cur >= DAY - 1) fol = FOLLOW_DELTA;
   else for (const p of PARTS) if (cur - p.ts >= 12240) fol += 1;
-  return { imp, eng, fol, n };
+  if (pub) {
+    const P = PUB as PubD;
+    const at = (a: number[]): number => {
+      const x = Math.max(0, Math.min(24, (cur / DAY) * 24));
+      const i = Math.min(23, Math.floor(x));
+      return a[i] + (a[i + 1] - a[i]) * (x - i);
+    };
+    return { imp: imp * PUB_SC.imp, eng: eng * PUB_SC.eng, fol, n: n.map((c, k) => Math.round(c * PUB_SC.n[k])), ea: at(P.cPost), ec: at(P.cCom), er: at(P.cRt) };
+  }
+  return { imp, eng, fol, n, ea: 0, ec: 0, er: 0 };
 }
 function pieceRow(ctx: CanvasRenderingContext2D, ps: { t: string; c: string }[], x: number, y: number, maxW: number, size: number, font: string, fw: string): void {
   let sz = size;
@@ -1565,6 +1738,9 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
   ROLL.imp = ease(ROLL.imp, b.imp, kk);
   ROLL.eng = ease(ROLL.eng, b.eng, kk);
   ROLL.fol = ease(ROLL.fol, b.fol, kk);
+  ROLL.ea = ease(ROLL.ea, b.ea, kk);
+  ROLL.ec = ease(ROLL.ec, b.ec, kk);
+  ROLL.er = ease(ROLL.er, b.er, kk);
   const fol = Math.round(ROLL.fol);
   // Live status first: the aura, the background layer and the word all follow it
   liveStep(cur, now);
@@ -1575,21 +1751,27 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
   // Hierarchy: primary = engagement (falls back to the first enabled metric), then the post counts, then the secondary metrics (impressions, followers, follower change)
   type Item = { l: string; v: string; c: number[] };
   const na = tx("缺失", "n/a");
+  const pubOn = MODE === "public" && PUB !== null;
   const mEng: Item | null = v.eng ? { l: tx("互动", "Engagement"), v: HAS_ENG ? fmtN(ROLL.eng) : na, c: [255, 150, 180] } : null;
-  const mImp: Item | null = v.imp ? { l: tx("曝光", "Impressions"), v: HAS_IMP ? fmtN(ROLL.imp) : na, c: [255, 206, 130] } : null;
-  const mFans: Item | null = v.fans && FOLLOW_NOW !== null ? { l: tx("粉丝", "Followers"), v: fmtN(FOLLOW_NOW - FOLLOW_DELTA + fol), c: [226, 236, 250] } : null;
-  const mFol: Item | null = v.follow ? { l: tx("关注变化", "Followers Δ"), v: (fol > 0 ? "+" : "") + fol, c: PART_RGB } : null;
-  const order = [mEng, mImp, mFans, mFol];
+  const mImp: Item | null = v.imp ? { l: pubOn ? tx("浏览", "Views") : tx("曝光", "Impressions"), v: HAS_IMP ? fmtN(ROLL.imp) : na, c: [255, 206, 130] } : null;
+  const mFans: Item | null = pubOn
+    ? v.fans ? { l: tx("发帖人", "Posters"), v: fmtN(ROLL.ea), c: [140, 255, 190] } : null
+    : v.fans && FOLLOW_NOW !== null ? { l: tx("粉丝", "Followers"), v: fmtN(FOLLOW_NOW - FOLLOW_DELTA + fol), c: [226, 236, 250] } : null;
+  const mFol: Item | null = pubOn
+    ? v.follow ? { l: tx("评论人", "Commenters"), v: fmtN(ROLL.ec), c: [120, 215, 255] } : null
+    : v.follow ? { l: tx("关注变化", "Followers Δ"), v: (fol > 0 ? "+" : "") + fol, c: PART_RGB } : null;
+  const mRt: Item | null = pubOn && v.eng ? { l: tx("转推", "Reposts"), v: fmtN(ROLL.er), c: [255, 170, 120] } : null;
+  const order = pubOn ? [mImp, mEng, mRt, mFans, mFol] : [mEng, mImp, mFans, mFol];
   const prim = order.find((x) => x !== null) ?? null;
   const sec = order.filter((x) => x !== null && x !== prim) as Item[];
   const rows: { ps: { t: string; c: string }[]; sz: number }[] = [];
   if (v.posts) {
-    const kn = [tx("发帖 ", "Posts "), tx("回帖 ", "Replies "), tx("引用 ", "Quotes ")];
+    const kn = pubOn ? [tx("原创 ", "Posts "), tx("评论 ", "Replies "), tx("引用 ", "Quotes ")] : [tx("发帖 ", "Posts "), tx("回帖 ", "Replies "), tx("引用 ", "Quotes ")];
     const ps: { t: string; c: string }[] = [];
     for (let kd = 0; kd < 3; kd++) {
       if (kd > 0) ps.push({ t: "  ", c: "#9fb2cc" });
       ps.push({ t: kn[kd], c: "#a9bbd3" });
-      ps.push({ t: String(b.n[kd]), c: rgba(kcol(st, kd), 1) });
+      ps.push({ t: pubOn ? fmtN(b.n[kd]) : String(b.n[kd]), c: rgba(kcol(st, kd), 1) });
     }
     rows.push({ ps, sz: 0.118 });
   }
@@ -1602,7 +1784,7 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
     });
     rows.push({ ps, sz });
   };
-  if (sec.length === 3) {
+  if (sec.length >= 3) {
     secRow(sec.slice(0, 2), 0.105);
     secRow(sec.slice(2), 0.1);
   } else if (sec.length > 0) secRow(sec, 0.105);
@@ -1695,7 +1877,7 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
         ctx.font = "600 " + ra * 1.1 + "px " + font;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(Array.from(NAME || USERNAME || "?")[0].toUpperCase(), cx, ay + ra * 0.04);
+        ctx.fillText(Array.from(nameStr() || USERNAME || "?")[0].toUpperCase(), cx, ay + ra * 0.04);
       }
       ctx.restore();
     } else {
@@ -1705,23 +1887,23 @@ function drawCenter(ctx: CanvasRenderingContext2D, cx: number, zr: number, S: nu
     }
   }
   // Account name / handle
-  const nameOn = v.name && NAME !== "";
-  const handleOn = v.handle && HANDLE !== "";
+  const nameOn = v.name && nameStr() !== "";
+  const handleOn = v.handle && handleStr() !== "";
   if (nameOn || handleOn) {
     const ny = v.avatar || v.status ? ay + ra + Math.max(zr * 0.09, 7 * sc) : cx + zr * (hasM ? -0.34 : 0);
     const fs = Math.max(8, zr * 0.11);
     const mw = chord((ny - cx) / zr);
     ctx.font = "600 " + fs + "px " + font;
-    const w1 = ctx.measureText(NAME + "  " + HANDLE).width;
+    const w1 = ctx.measureText(nameStr() + "  " + handleStr()).width;
     if (nameOn && handleOn && w1 > mw && mw / w1 < 0.8) {
       // If one line does not fit, split into two (name above, handle below), each scaled to fit, never truncated
-      pieceRow(ctx, [{ t: NAME, c: "#eaf2ff" }], cx, ny - fs * 0.62, mw, fs, font, "600 ");
-      pieceRow(ctx, [{ t: HANDLE, c: "#8fa6c4" }], cx, ny + fs * 0.62, mw, fs, font, "600 ");
+      pieceRow(ctx, [{ t: nameStr(), c: "#eaf2ff" }], cx, ny - fs * 0.62, mw, fs, font, "600 ");
+      pieceRow(ctx, [{ t: handleStr(), c: "#8fa6c4" }], cx, ny + fs * 0.62, mw, fs, font, "600 ");
     } else {
       const ps: { t: string; c: string }[] = [];
-      if (nameOn) ps.push({ t: NAME, c: "#eaf2ff" });
+      if (nameOn) ps.push({ t: nameStr(), c: "#eaf2ff" });
       if (nameOn && handleOn) ps.push({ t: "  ", c: "#eaf2ff" });
-      if (handleOn) ps.push({ t: HANDLE, c: "#8fa6c4" });
+      if (handleOn) ps.push({ t: handleStr(), c: "#8fa6c4" });
       pieceRow(ctx, ps, cx, ny, mw, fs, font, "600 ");
     }
   }
@@ -2204,6 +2386,15 @@ function liveStep(cur: number, now: number): void {
       L.at = now;
     }
   }
+  if (MODE === "public" && PUB !== null) {
+    // public: the word is the hour's rank tier (the same level the heat card shows)
+    const tt = PUB.tier[Math.max(0, Math.min(23, Math.floor(cur / 3600)))];
+    if (tt !== L.lvl) {
+      L.prev = L.lvl;
+      L.lvl = tt;
+      L.at = now;
+    }
+  }
   const lo = L.lvl === 0 ? 0 : T[L.lvl - 1];
   const hi = L.lvl === 4 ? T[3] * 1.8 : T[L.lvl];
   const f = Math.max(0, Math.min(1, (L.sm - lo) / Math.max(1e-6, hi - lo)));
@@ -2589,10 +2780,25 @@ function selectDay(i: number): void {
     if (lp.mi !== 0 && t > 0) continue;
     TICKS.push({ a: (t / DAY) * TAU2 - Math.PI / 2, major: lp.mi === 0 && lp.h % 3 === 0, label: pad2(lp.h) + ":" + pad2(lp.mi) });
   }
-  AVAIL = { ...VIS_TRUE, handle: HANDLE !== "", name: NAME !== "", follow: HAS_FOL, fans: FOLLOW_NOW !== null, text: ANY_TEXT };
+  AVAIL = MODE === "public" ? { ...VIS_TRUE, follow: true, fans: true, text: ANY_TEXT } : { ...VIS_TRUE, handle: HANDLE !== "", name: NAME !== "", follow: HAS_FOL, fans: FOLLOW_NOW !== null, text: ANY_TEXT };
+  PUB_SC = { imp: 1, eng: 1, n: [1, 1, 1] };
+  if (PUB !== null) {
+    // the running sums of the dots are scaled so that the end of the turn equals the totals exactly (and the factors stay visible to tests)
+    let si = 0;
+    let se = 0;
+    const sn = [0, 0, 0];
+    for (const n of NODES) {
+      const w = n.url === null ? PUB.N : 1;
+      si += (n.v ?? 0) * w;
+      se += ((n.l ?? 0) + (n.r ?? 0) + (n.c ?? 0) + (n.q ?? 0)) * w;
+      sn[n.kind] += w;
+    }
+    const tot = [PUB.t.orig, PUB.t.reply, PUB.t.quote];
+    PUB_SC = { imp: si > 0 ? PUB.t.views / si : 1, eng: se > 0 ? PUB.t.engagement / se : 1, n: sn.map((c, k) => (c > 0 ? tot[k] / c : 1)) };
+  }
   VIS_TOTAL = Object.values(AVAIL).filter((x) => x).length;
   FOL0 = FOLLOW_DELTA - PARTS.length;
-  ROLL = { imp: 0, eng: 0, fol: FOL0, t: 0 };
+  ROLL = { imp: 0, eng: 0, fol: FOL0, ea: 0, ec: 0, er: 0, t: 0 };
   BIG_IDX = NODES.filter((n) => n.tier > 0).map((n) => n.idx);
   NODE_TS = NODES.map((n) => n.ts);
   {
@@ -2618,7 +2824,383 @@ function selectDay(i: number): void {
   const mx = Math.max(1, ...c);
   ACT = c.map((v) => Math.sqrt(v / mx));
 }
-if (BAD_DATA === null && MODE === "personal") selectDay(DAYS.length - 1);
+if (BAD_DATA === null) selectDay(DAYS.length - 1);
+
+// ---------- public edition: side panels, hot-post card, heat card, peak arc (React, drawn inside the stage frame) ----------
+// Wording rule: the dial, the centre board and the bars never say "estimated"; the only place with that wording is the element marked data-xp-caveat (sidebar) and the page footnotes.
+type PubKind = "wide" | "square" | "stack";
+interface RecCfg {
+  layout: PubKind;
+  fw: number;
+}
+const REC: RecCfg | null = (typeof window !== "undefined" ? (window as unknown as { __XPULSE_REC?: RecCfg }).__XPULSE_REC : undefined) ?? null;
+interface PubL {
+  kind: PubKind;
+  u: number;
+  fw: number;
+  fh: number; // 0 = height follows the content (stack)
+  size: number;
+  top: number; // top of the dial inside the frame (wide / square)
+}
+function pubLayout(avail: number, aspect: number): PubL {
+  const kind: PubKind = REC !== null ? REC.layout : aspect === 2 && avail >= 1400 ? "wide" : aspect === 0 && avail >= 760 ? "square" : "stack";
+  if (kind === "wide") {
+    const fw = REC !== null ? REC.fw : Math.min(avail, 1920);
+    const u = fw / 1920;
+    return { kind, u, fw, fh: Math.round((fw * 9) / 16), size: Math.floor(1056 * u), top: Math.round(12 * u) };
+  }
+  if (kind === "square") {
+    const fw = REC !== null ? REC.fw : Math.min(avail, 1080);
+    const u = fw / 1080;
+    return { kind, u, fw, fh: fw, size: Math.floor(956 * u), top: Math.round(30 * u) };
+  }
+  const fw = Math.max(280, Math.min(avail, aspect === 1 ? 460 : 1040));
+  return { kind, u: Math.max(0.6, Math.min(1, fw / 900)), fw, fh: 0, size: Math.floor(Math.max(220, Math.min(fw - 24, 760))), top: 0 };
+}
+const PUB_KC = ["#ffb703", "#4cc9f0", "#f72585"];
+const PUB_LV = ["#96afff", "#7ce096", "#ffd666", "#ff9646", "#ff5c6e"];
+type Css = { [k: string]: string | number | undefined };
+const F = (n: number, u: number): number => Math.max(11, Math.round(n * u * 10) / 10);
+const clampCss = (n: number): Css => ({ display: "-webkit-box", WebkitLineClamp: n, WebkitBoxOrient: "vertical", overflow: "hidden" });
+const boxCss = (u: number, extra: Css): Css => ({
+  boxSizing: "border-box",
+  background: "linear-gradient(160deg,rgba(14,22,42,.88),rgba(8,12,26,.92))",
+  border: "1px solid rgba(120,160,220,.28)",
+  borderRadius: 16 * u,
+  boxShadow: "0 0 28px rgba(60,120,220,.16) inset, 0 6px 30px rgba(0,0,0,.4)",
+  padding: 22 * u,
+  color: "#e8eef9",
+  lineHeight: 1.5,
+  fontSize: F(20, u),
+  overflow: "hidden",
+  ...extra,
+});
+// The hot post whose card is on screen at `cur`: index (or -1), progress 0..1 and the fade-in / fade-out opacity
+function pubHotAt(cur: number): { k: number; q: number; o: number } {
+  if (PUB === null) return { k: -1, q: 0, o: 0 };
+  const showS = PUB.cardHours * 3600;
+  let k = -1;
+  let q = 0;
+  PUB.hot.forEach((h, i) => {
+    const d = cur - h.ts;
+    if (d >= 0 && d < showS) {
+      k = i;
+      q = d / showS;
+    }
+  });
+  return { k, q, o: k < 0 ? 0 : Math.min(1, q / 0.07, (1 - q) / 0.1) };
+}
+const dotEl = (c: string, u: number) => <span style={{ display: "inline-block", width: 12 * u, height: 12 * u, borderRadius: "50%", background: c, marginRight: 9 * u, verticalAlign: -1 * u }} />;
+const rule = (u: number) => <div style={{ height: 1, background: "rgba(120,160,220,.22)", margin: 0, flex: "none", marginTop: 4 * u, marginBottom: 4 * u }} />;
+const pubPeak = (): number => {
+  let b = 0;
+  for (let i = 1; i < 24; i++) if (PUB !== null && PUB.hp[i] > PUB.hp[b]) b = i;
+  return b;
+};
+const hourRange = (i: number): string => tzHM(i * 3600) + "–" + tzHM((i + 1) * 3600);
+const pubWindow = (): string => tzDT(0, false) + " → " + tzDT(DAY, false) + " · " + tzLabel();
+const pubHeadline = (): string => tx("24 小时 " + topicTitle() + " 热度", "24-hour " + topicTitle() + " heat");
+// The row list of totals (sidebar); people carry their 90% range as a small second line
+function PubTotals(p: { u: number; kind: PubKind }) {
+  const u = p.u;
+  const T = PUB !== null ? PUB.t : {};
+  const rows: [string, string, string, string, string][] = [
+    [tx("原创", "Posts"), PUB_KC[0], fmtC(T.orig), tx(" 帖", ""), ""],
+    [tx("评论", "Replies"), PUB_KC[1], fmtC(T.reply), tx(" 帖", ""), ""],
+    [tx("引用", "Quotes"), PUB_KC[2], fmtC(T.quote), tx(" 帖", ""), ""],
+    [tx("转推", "Reposts"), "#ffaa78", fmtC(T.reposts), "", ""],
+    [tx("发帖人", "Posters"), "#7cffb2", fmtC(T.posters), "", fmtC(T.postersLow) + " – " + fmtC(T.postersHigh)],
+    [tx("评论人", "Commenters"), "#78d7ff", fmtC(T.commenters), "", fmtC(T.commentersLow) + " – " + fmtC(T.commentersHigh)],
+  ];
+  return (
+    <div>
+      <div style={{ fontSize: F(17, u), color: "#8ea3c2", letterSpacing: 2 * u, marginBottom: 8 * u }}>{tx("窗口总量", "WINDOW TOTALS")}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", whiteSpace: "nowrap" }}>
+        <div>
+          <div data-xp-total="views" style={{ fontSize: F(40, u), fontWeight: 800, lineHeight: 1.15, color: "#ffd28a", fontVariantNumeric: "tabular-nums" }}>{fmtC(T.views)}</div>
+          <div style={{ fontSize: F(17, u), color: "#9fb2cc" }}>{tx("浏览", "Views")}</div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div data-xp-total="engagement" style={{ fontSize: F(40, u), fontWeight: 800, lineHeight: 1.15, color: "#ff9fbd", fontVariantNumeric: "tabular-nums" }}>{fmtC(T.engagement)}</div>
+          <div style={{ fontSize: F(17, u), color: "#9fb2cc" }}>{tx("互动", "Engagement")}</div>
+        </div>
+      </div>
+      <div style={{ fontSize: F(17, u), color: "#9fb2cc", margin: 4 * u + "px 0 " + 10 * u + "px" }}>{tx("浏览区间 ", "Views range ") + fmtC(T.viewsLow) + " – " + fmtC(T.viewsHigh)}</div>
+      {rows.map((r) => (
+        <div key={r[0]} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: F(20, u), lineHeight: 1.7 }}>
+          <span>
+            {dotEl(r[1], u)}
+            {r[0]}
+          </span>
+          <b data-xp-total={r[0]} data-xp-num={r[2]} style={{ fontVariantNumeric: "tabular-nums" }}>
+            {r[2] + r[3]}
+            {r[4] !== "" ? <span style={{ fontWeight: 400, fontSize: F(15, u), color: "#8ea3c2" }}>{"  (" + r[4] + ")"}</span> : null}
+          </b>
+        </div>
+      ))}
+    </div>
+  );
+}
+function PubLegend(p: { u: number }) {
+  const u = p.u;
+  if (PUB === null) return null;
+  return (
+    <div>
+      <div style={{ fontSize: F(17, u), color: "#8ea3c2", letterSpacing: 2 * u, marginBottom: 8 * u }}>{tx("图例", "LEGEND")}</div>
+      <div style={{ fontSize: F(20, u), lineHeight: 1.7 }}>
+        {dotEl(PUB_KC[0], u)}
+        {tx("原创", "Posts")}
+        {"  "}
+        {dotEl(PUB_KC[1], u)}
+        {tx("评论", "Replies")}
+        {"  "}
+        {dotEl(PUB_KC[2], u)}
+        {tx("引用", "Quotes")}
+      </div>
+      <div style={{ fontSize: F(20, u), lineHeight: 1.7 }}>
+        {dotEl("#7cffb2", u)}
+        {tx("彗星 = 活跃发帖人", "Comet = active poster")}
+      </div>
+      <div style={{ fontSize: F(17, u), color: "#9fb2cc" }}>{tx("涟漪大小 = 浏览量 · 亮度 = 互动量", "Ripple size = views · glow = engagement")}</div>
+      <div style={{ fontSize: F(18, u), fontWeight: 700, color: "#ffd666", marginTop: 6 * u }}>{tx("1 点 ≈ " + fmtC(PUB.N) + " 帖 · 1 彗星 ≈ " + fmtC(PUB.M) + " 人", "1 dot ≈ " + fmtC(PUB.N) + " posts · 1 comet ≈ " + fmtC(PUB.M) + " people")}</div>
+    </div>
+  );
+}
+function PubInfo(p: { u: number; kind: PubKind; abs: boolean }) {
+  const u = p.u;
+  if (PUB === null) return null;
+  const abs: Css = p.abs ? { position: "absolute", left: 24 * u, top: 24 * u, width: 372 * u, height: 1032 * u } : { width: "100%" };
+  return (
+    <div data-xp-panel="info" style={boxCss(u, { ...abs, display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 10 * u })}>
+      <div>
+        <span style={{ display: "inline-block", fontSize: F(18, u), padding: "2px " + 14 * u + "px", borderRadius: 12 * u, border: "1px solid rgba(255,214,102,.6)", color: "#ffd666", letterSpacing: 0.5 }}>{["X Pulse", "Public", topicTitle()].join(" · ")}</span>
+        <div style={{ fontSize: F(34, u), fontWeight: 700, letterSpacing: 1, lineHeight: 1.25, marginTop: 10 * u }}>{pubHeadline()}</div>
+        <div style={{ fontSize: F(17, u), color: "#9fb2cc", marginTop: 8 * u }}>{pubWindow()}</div>
+        <div style={{ fontSize: F(17, u), color: "#9fb2cc" }}>{PUB.scope[LANG]}</div>
+      </div>
+      {rule(u)}
+      <PubLegend u={u} />
+      {rule(u)}
+      <PubTotals u={u} kind={p.kind} />
+      <div data-xp-caveat="1" style={{ fontSize: F(15, u), color: "#9fb2cc", lineHeight: 1.45 }}>
+        {PUB.caveat[LANG]}
+      </div>
+    </div>
+  );
+}
+function PubBars(p: { w: number; h: number; u: number; cur: number }) {
+  if (PUB === null) return null;
+  const { w, h, u } = p;
+  const hi = Math.max(0, Math.min(23, Math.floor(p.cur / 3600)));
+  const mx = Math.max(1, ...PUB.hp);
+  const bw = w / 24;
+  const fs = F(15, u);
+  return (
+    <svg width={w} height={h} style={{ display: "block" }}>
+      {PUB.hp.map((x, i) => {
+        const bh = Math.max(3, (x / mx) * (h - 24 * u - fs * 0.4));
+        return <rect key={i} x={i * bw + 1} y={h - 20 * u - bh} width={bw - 2.5} height={bh} rx={2} fill={PUB_LV[PUB !== null ? PUB.tier[i] : 0]} opacity={i === hi ? 1 : i < hi ? 0.62 : 0.2} />;
+      })}
+      {[0, 6, 12, 18, 24].map((k) => (
+        <text key={k} x={(k * w) / 24} y={h - 3} fontSize={fs} fill="#8ea3c2" textAnchor={k === 0 ? "start" : k === 24 ? "end" : "middle"}>
+          {tzHM(k * 3600)}
+        </text>
+      ))}
+    </svg>
+  );
+}
+function PubHeat(p: { u: number; kind: PubKind; cur: number; abs: boolean; fade: number }) {
+  const u = p.u;
+  if (PUB === null) return null;
+  const pk = pubPeak();
+  const hi = Math.max(0, Math.min(23, Math.floor(p.cur / 3600)));
+  const tier = PUB.tier[hi];
+  const mean = PUB.hp.reduce((a, b) => a + b, 0) / 24;
+  const peakLine = tx("峰值 ", "Peak ") + hourRange(pk) + tx(" · 约 ", " · about ") + fmtC(PUB.hp[pk]) + tx(" 帖/小时", " posts/hour");
+  if (p.kind === "square") {
+    return (
+      <div data-xp-panel="heat" style={boxCss(u, { position: "absolute", left: 16 * u, top: 996 * u, width: 1048 * u, height: 74 * u, padding: 6 * u + "px " + 20 * u + "px", opacity: p.fade, display: "flex", alignItems: "center", gap: 24 * u })}>
+        <div style={{ flex: "none" }}>
+          <PubBars w={520 * u} h={56 * u} u={u} cur={p.cur} />
+        </div>
+        <div style={{ fontSize: F(17, u), lineHeight: 1.5, color: "#c9d6ea", minWidth: 0 }}>
+          <span style={{ fontWeight: 800, fontSize: F(26, u), color: PUB_LV[tier] }}>{liveNames()[tier]}</span>
+          {"  " + tx("热度档位", "heat level")}
+          <br />
+          <span style={{ color: "#ffd666" }}>{peakLine}</span>
+        </div>
+      </div>
+    );
+  }
+  const abs: Css = p.abs ? { position: "absolute", left: 1524 * u, top: 548 * u, width: 372 * u, height: 508 * u } : { width: "100%", minHeight: 300 * u };
+  const bw = p.abs ? 328 * u : Math.max(200, 372 * u * (p.kind === "stack" ? 1.5 : 1));
+  return (
+    <div data-xp-panel="heat" style={boxCss(u, { ...abs, display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 8 * u })}>
+      <div>
+        <div style={{ fontSize: F(26, u), fontWeight: 700, lineHeight: 1.25 }}>{tx("热度档位 · 峰值时刻", "Heat level · peak hour")}</div>
+        <div style={{ fontSize: F(17, u), color: "#9fb2cc", marginTop: 6 * u }}>
+          <span style={{ color: "#ffd666" }}>{peakLine}</span>
+        </div>
+      </div>
+      <div>
+        <PubBars w={bw} h={150 * u} u={u} cur={p.cur} />
+      </div>
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: F(LANG === "zh" ? 54 : 38, u), fontWeight: 800, letterSpacing: (LANG === "zh" ? 8 : 2) * u, lineHeight: 1.2, whiteSpace: "nowrap", color: PUB_LV[tier] }}>{liveNames()[tier]}</div>
+        <div style={{ fontSize: F(17, u), color: "#9fb2cc" }}>{hourRange(hi) + tx(" 约 ", " about ") + fmtC(PUB.hp[hi]) + tx(" 帖（均值 ", " posts (mean ") + fmtC(mean) + tx("）", ")")}</div>
+      </div>
+      <div style={{ fontSize: F(15, u), color: "#9fb2cc" }}>{tx("档位按 24 小时帖量排名分五档，与中心状态词一致。", "Level = this hour's rank by post volume across the 24 hours; the same word is in the dial centre.")}</div>
+    </div>
+  );
+}
+function PubHotCard(p: { u: number; kind: PubKind; cur: number; abs: boolean }) {
+  const u = p.u;
+  if (PUB === null) return null;
+  const hs = pubHotAt(p.cur);
+  const h = hs.k >= 0 ? PUB.hot[hs.k] : null;
+  const gloss = h !== null && h.lang !== LANG ? h.gloss[LANG] : undefined;
+  const who = h !== null && h.u !== "" && h.u !== "?" ? " · @" + h.u : "";
+  const head = h !== null ? "🔥 " + tx("热帖", "Hot post") + " · " + tzHM(h.ts) + who : "";
+  const stat =
+    h !== null ? (
+      <div style={{ fontSize: F(18, u), color: "#ffb0c8", marginTop: 12 * u }}>
+        {tx("浏览 ", "Views ")}
+        <b>{fmtC(h.v)}</b>
+        {tx(" · 赞 ", " · Likes ") + fmtC(h.l) + tx(" · 评论 ", " · Replies ") + fmtC(h.r)}
+      </div>
+    ) : null;
+  if (p.kind === "square") {
+    return (
+      <div data-xp-panel="hot" style={boxCss(u, { position: "absolute", left: 16 * u, top: 996 * u, width: 1048 * u, height: 74 * u, padding: 8 * u + "px " + 20 * u + "px", opacity: Math.max(0, (hs.o - 0.4) / 0.6), transform: "translateY(" + (1 - Math.min(1, hs.q / 0.07)) * 14 * u + "px)", display: "flex", alignItems: "center", gap: 18 * u, pointerEvents: "none" })}>
+        {h !== null ? (
+          <div style={{ display: "contents" }}>
+            <div style={{ flex: "none", fontSize: F(17, u), lineHeight: 1.4, color: "#ffd666" }}>
+              {"🔥 " + tzHM(h.ts)}
+              {who !== "" ? <br /> : null}
+              {who !== "" ? "@" + h.u : ""}
+            </div>
+            <div style={{ flex: 1, minWidth: 0, lineHeight: 1.4 }}>
+              <div style={{ fontSize: F(19, u), fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.title}</div>
+              {gloss ? <div style={{ fontSize: F(17, u), color: "#9fe3ff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{gloss}</div> : null}
+            </div>
+            <div style={{ flex: "none", fontSize: F(18, u), color: "#ffb0c8" }}>
+              {tx("浏览 ", "Views ")}
+              <b>{fmtC(h.v)}</b>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+  const abs: Css = p.abs
+    ? { position: "absolute", left: 1524 * u, top: 24 * u, width: 372 * u, height: 500 * u, opacity: hs.o, transform: "translateX(" + (1 - Math.min(1, hs.q / 0.07)) * 30 * u + "px)" }
+    : { width: "100%", minHeight: 300 * u };
+  return (
+    <div data-xp-panel="hot" style={boxCss(u, { ...abs, pointerEvents: "none" })}>
+      {h !== null ? (
+        <div>
+          <div style={{ fontSize: F(17, u), color: "#ffd666", letterSpacing: 1 }}>{head}</div>
+          <div style={{ fontSize: F(24, u), lineHeight: 1.4, marginTop: 8 * u, fontWeight: 600, ...clampCss(3) }}>{h.title}</div>
+          {gloss ? <div style={{ fontSize: F(21, u), lineHeight: 1.45, marginTop: 8 * u, color: "#9fe3ff", ...clampCss(6) }}>{gloss}</div> : null}
+          {stat}
+        </div>
+      ) : (
+        <div style={{ fontSize: F(17, u), color: "#9fb2cc" }}>{tx("🔥 热帖卡片：当小时出现高浏览的真实帖子时在这里亮起", "🔥 Hot-post card: lights up here when a high-view real post appears")}</div>
+      )}
+    </div>
+  );
+}
+// Square layout: two header boxes at the top, heat bar / hot post in the bottom strip
+function PubSquareTop(p: { u: number }) {
+  const u = p.u;
+  if (PUB === null) return null;
+  const T = PUB.t;
+  const cs: Css = { fontSize: F(16, u), lineHeight: 1.55 };
+  const box: Css = { width: 420 * u, height: 160 * u, padding: 10 * u + "px " + 18 * u + "px", top: 12 * u, position: "absolute", overflow: "hidden" };
+  return (
+    <div>
+      <div data-xp-panel="info" style={boxCss(u, { ...box, left: 16 * u })}>
+        <span style={{ display: "inline-block", fontSize: F(17, u), padding: "0 " + 14 * u + "px", borderRadius: 12 * u, border: "1px solid rgba(255,214,102,.6)", color: "#ffd666" }}>{["X Pulse", "Public", topicTitle()].join(" · ")}</span>
+        <div style={{ fontSize: F(25, u), fontWeight: 700, lineHeight: 1.3, marginTop: 2 * u }}>{pubHeadline()}</div>
+        <div style={{ ...cs, color: "#9fb2cc" }}>{pubWindow()}</div>
+        <div style={{ ...cs, color: "#9fb2cc" }}>
+          {tx("浏览 ", "Views ") + fmtC(T.views) + " · "}
+          <span data-xp-caveat="1">{tx("估算值", "estimated")}</span>
+        </div>
+      </div>
+      <div data-xp-panel="legend" style={boxCss(u, { ...box, right: 16 * u, position: "absolute" })}>
+        <div style={cs}>
+          {dotEl(PUB_KC[0], u)}
+          {tx("原创", "Posts")}
+          {"  "}
+          {dotEl(PUB_KC[1], u)}
+          {tx("评论", "Replies")}
+          {"  "}
+          {dotEl(PUB_KC[2], u)}
+          {tx("引用", "Quotes")}
+        </div>
+        <div style={cs}>
+          {dotEl("#7cffb2", u)}
+          {tx("彗星=发帖人 · 涟漪=浏览 · 亮度=互动", "Comet=poster · ripple=views · glow=engagement")}
+        </div>
+        <div style={{ ...cs, fontWeight: 700, color: "#ffd666" }}>{tx("1 点 ≈ " + fmtC(PUB.N) + " 帖 · 1 彗星 ≈ " + fmtC(PUB.M) + " 人", "1 dot ≈ " + fmtC(PUB.N) + " posts · 1 comet ≈ " + fmtC(PUB.M) + " people")}</div>
+        <div style={cs}>{tx("转推 ", "Reposts ") + fmtC(T.reposts) + tx(" · 发帖人 ", " · Posters ") + fmtC(T.posters)}</div>
+      </div>
+    </div>
+  );
+}
+// The panels around the dial. part "top" is only used by the stacked layout (the info box above the dial); "bottom" holds the rest (all boxes in the wide / square layouts).
+function PubPanels(p: { l: PubL; cur: number; part: "top" | "bottom" }) {
+  const { kind, u } = p.l;
+  if (PUB === null) return null;
+  const hs = pubHotAt(p.cur);
+  if (kind === "stack") {
+    if (p.part === "top") return <PubInfo u={u} kind={kind} abs={false} />;
+    return hs.k >= 0 ? <PubHotCard u={u} kind={kind} cur={p.cur} abs={false} /> : <PubHeat u={u} kind={kind} cur={p.cur} abs={false} fade={1} />;
+  }
+  if (p.part === "top") return null;
+  if (kind === "wide")
+    return (
+      <div>
+        <PubInfo u={u} kind={kind} abs={true} />
+        <PubHotCard u={u} kind={kind} cur={p.cur} abs={true} />
+        <PubHeat u={u} kind={kind} cur={p.cur} abs={true} fade={1} />
+      </div>
+    );
+  return (
+    <div>
+      <PubSquareTop u={u} />
+      <PubHeat u={u} kind={kind} cur={p.cur} abs={true} fade={hs.k >= 0 ? Math.max(0, 1 - hs.o * 2.5) : 1} />
+      <PubHotCard u={u} kind={kind} cur={p.cur} abs={true} />
+    </div>
+  );
+}
+// Peak-hour arc along the dial rim, with a label; lights up (flashing once) when the hand passes the peak hour
+function PubPeak(p: { size: number; kind: PubKind; u: number; cur: number }) {
+  if (PUB === null) return null;
+  const g = geo(p.size);
+  const pk = pubPeak();
+  const a0 = (pk / 24) * TAU2 - Math.PI / 2;
+  const a1 = ((pk + 1) / 24) * TAU2 - Math.PI / 2;
+  const ra = g.rim + 9 * p.u;
+  const x0 = g.cx + ra * Math.cos(a0);
+  const y0 = g.cx + ra * Math.sin(a0);
+  const x1 = g.cx + ra * Math.cos(a1);
+  const y1 = g.cx + ra * Math.sin(a1);
+  const wide = p.kind === "wide";
+  const tx0 = Math.min(x0, x1) - (wide ? 10 : 22) * p.u;
+  const ty = wide ? Math.min(p.size - 2, y0 + 6 * p.u) : y0 + 6;
+  const pass = p.cur - pk * 3600;
+  const op = pass < 0 ? 0 : pass < 3600 ? 0.55 + 0.45 * Math.abs(Math.sin((pass / 3600) * Math.PI * 4)) : 1;
+  return (
+    <svg width={p.size} height={p.size} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none", overflow: "visible", opacity: op }}>
+      <path d={"M" + x0 + " " + y0 + " A" + ra + " " + ra + " 0 0 1 " + x1 + " " + y1} stroke="#ffd666" strokeWidth={9 * p.u} fill="none" strokeLinecap="round" />
+      <text x={tx0} y={ty} textAnchor="end" fontSize={Math.max(15, Math.round(p.size * 0.021))} fontWeight={700} fill="#ffd666">
+        {"▲ " + tx("峰值 ", "Peak ") + tzHM(pk * 3600)}
+      </text>
+    </svg>
+  );
+}
 
 function Replay() {
   const theme = useGrokTheme();
@@ -2629,7 +3211,7 @@ function Replay() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [avail, setAvail] = useState<number>(360);
-  const [aspect, setAspect] = useState<number>(0);
+  const [aspect, setAspect] = useState<number>(REC !== null && REC.layout === "wide" ? 2 : 0);
   const [panel, setPanel] = useState<boolean>(false);
   const [prog, setProg] = useState<number>(0);
   const [playing, setPlaying] = useState<boolean>(!REDUCED);
@@ -2647,12 +3229,13 @@ function Replay() {
   const [tipDy, setTipDy] = useState<number>(0);
   const actRef = useRef<{ toggle: () => void; step: (d: number) => void; lang: () => void }>({ toggle: () => {}, step: () => {}, lang: () => {} });
   // Aspect ratios: 1:1 / 9:16 / 16:9 fixed frames; the dial size is the frame minus legend and status line
-  const fw = Math.max(280, Math.min(avail, aspect === 0 ? 800 : aspect === 1 ? 460 : 1040));
+  const PL = PUB !== null ? pubLayout(avail, aspect) : null; // public: the layout decides frame, dial size and panels
+  const fw = PL !== null ? PL.fw : Math.max(280, Math.min(avail, aspect === 0 ? 800 : aspect === 1 ? 460 : 1040));
   const fh0 = aspect === 0 ? fw : aspect === 1 ? Math.round((fw * 16) / 9) : Math.round((fw * 9) / 16);
-  const lh = vis.legend ? (fw < 560 ? 64 : 46) : 0;
-  const sh = vis.status && HAS_STATUS ? 26 : 0;
-  const size = Math.floor(Math.max(220, Math.min(fw - 24, fh0 - 24 - lh - sh)));
-  const fh = Math.max(fh0, size + 24 + lh + sh);
+  const lh = PL !== null ? 0 : vis.legend ? (fw < 560 ? 64 : 46) : 0;
+  const sh = PL !== null ? 0 : vis.status && HAS_STATUS ? 26 : 0;
+  const size = PL !== null ? PL.size : Math.floor(Math.max(220, Math.min(fw - 24, fh0 - 24 - lh - sh)));
+  const fh = PL !== null ? PL.fh : Math.max(fh0, size + 24 + lh + sh);
 
   const progRef = useRef<number>(0);
   const playRef = useRef<boolean>(!REDUCED);
@@ -2918,6 +3501,32 @@ function Replay() {
     saveLang(l);
   };
   actRef.current = { toggle: togglePlay, step, lang: () => setLang(lang === "zh" ? "en" : "zh") };
+  if (REC !== null) {
+    // Recorder hook (public/video): only exists when the host page defined window.__XPULSE_REC before this script ran
+    (window as unknown as { __XPULSE_API?: unknown }).__XPULSE_API = {
+      state: () => ({ p: progRef.current, play: playRef.current, speed: speedRef.current, music: musicRef.current, follow: optsRef.current.vis.follow, fin: endAtRef.current, lvl: LIVE.lvl, lang: LANG, size: sizeRef.current }),
+      set: (o: { p?: number; play?: boolean; speed?: number; music?: number; lang?: Lang }) => {
+        if (o.p !== undefined) {
+          progRef.current = o.p;
+          endAtRef.current = 0;
+          setProg(o.p);
+        }
+        if (o.play !== undefined) {
+          playRef.current = o.play;
+          setPlaying(o.play);
+        }
+        if (o.speed !== undefined) {
+          speedRef.current = o.speed;
+          setSpeed(o.speed);
+        }
+        if (o.music !== undefined) {
+          musicRef.current = o.music;
+          setMusic(o.music);
+        }
+        if (o.lang !== undefined) setLang(o.lang);
+      },
+    };
+  }
 
   const cur = prog * DAY;
   let fired = 0;
@@ -2971,7 +3580,7 @@ function Replay() {
         }}
       >
         <div style={{ color: rgba(col, 1), marginBottom: 4 }}>
-          {vis.time ? tzDT(tn.ts, true) + " " + TZ_LABEL + " · " : ""}
+          {vis.time ? tzDT(tn.ts, true) + " " + tzLabel() + " · " : ""}
           {kindName(tn.kind)}
           {tn.self ? tx(" · 续写自己", " · self-thread") : ""}
         </div>
@@ -2979,14 +3588,16 @@ function Replay() {
         {vis.imp || vis.eng ? (
           <div style={{ color: "#a9bad2", marginBottom: 4 }}>
             {[
-              vis.imp ? tx("曝光 ", "Impressions ") + m(tn.v) : "",
+              vis.imp ? (PUB !== null ? tx("浏览 ", "Views ") : tx("曝光 ", "Impressions ")) + m(tn.v) : "",
               vis.eng ? tx("赞 ", "Likes ") + m(tn.l) + tx(" · 转发 ", " · Reposts ") + m(tn.r) + tx(" · 回复 ", " · Replies ") + m(tn.c) + tx(" · 引用 ", " · Quotes ") + m(tn.q) : "",
             ]
               .filter((s) => s !== "")
               .join(" · ")}
           </div>
         ) : null}
-        {tn.url === null ? (
+        {tn.url === null && PUB !== null ? (
+          <div style={{ color: "#6f829c" }}>{tx("缩放样本点：1 点代表 " + fmtC(PUB.N) + " 帖，数值取自真实抽样帖", "Scaled sample dot: 1 dot stands for " + fmtC(PUB.N) + " posts; values come from real sampled posts")}</div>
+        ) : tn.url === null ? (
           <div style={{ color: "#6f829c" }}>{tx("没有原帖链接", "No link for this post")}</div>
         ) : tip.pinned ? (
           <a href={tn.url} target="_blank" rel="noopener noreferrer" style={{ color: "#7cc4ff", wordBreak: "break-all" }}>
@@ -3053,6 +3664,18 @@ function Replay() {
         ]
           .filter((x) => x !== "")
           .join(" ");
+  const pubFoot: string[] =
+    PUB === null
+      ? []
+      : [
+          PUB.scope[LANG],
+          PUB.caveat[LANG],
+          fn.metricsFetchedAt !== null ? tx("数据抓取于 " + fmtIso(fn.metricsFetchedAt) + "。", "Data fetched at " + fmtIso(fn.metricsFetchedAt) + ".") : "",
+          tx(
+            "表盘：每个光点是按真实抽样帖缩放的样本点（1 点 ≈ " + fmtC(PUB.N) + " 帖，共 " + COUNT_BY_KIND.reduce((a, b2) => a + b2, 0) + " 个点，其中 " + PUB.hot.length + " 个是可点开的真实热帖）；彗星 1 颗 ≈ " + fmtC(PUB.M) + " 位发帖人。中心看板随指针累计，转完一圈等于右侧合计。转推 = 全部帖 − 原创 − 评论 − 引用。",
+            "Dial: each dot is a sample dot scaled from real sampled posts (1 dot ≈ " + fmtC(PUB.N) + " posts, " + COUNT_BY_KIND.reduce((a, b2) => a + b2, 0) + " dots, " + PUB.hot.length + " of them real hot posts you can open); 1 comet ≈ " + fmtC(PUB.M) + " posters. The centre board accumulates with the hand and equals the sidebar totals after one turn. Reposts = all posts − originals − replies − quotes.",
+          ),
+        ].filter((x) => x !== "");
   const nOn = (Object.keys(vis) as (keyof Vis)[]).filter((k) => vis[k]).length;
   const tbtn = (active: boolean) => ({
     background: active ? "rgba(76,201,240,0.2)" : "transparent",
@@ -3093,12 +3716,16 @@ function Replay() {
   const hrs = Math.round((DAY / 3600) * 100) / 100;
   const dayLenNote = DAY === 86400 ? "" : tx("该日 " + hrs + " 小时（夏令时切换）", hrs + "-hour day (clock change)");
   const title = pageTitle(dd.date);
+  const subParts =
+    PUB !== null
+      ? [DATA.example ? tx("示例数据", "EXAMPLE DATA") : "", tzLabel(), vis.time ? pubWindow().split(" · ")[0] : "", tx("1 点 ≈ " + fmtC(PUB.N) + " 帖 · 1 彗星 ≈ " + fmtC(PUB.M) + " 人", "1 dot ≈ " + fmtC(PUB.N) + " posts · 1 comet ≈ " + fmtC(PUB.M) + " people"), tx("窗口起点在顶部，指针转一圈 = 24 小时", "Window start at the top, one hand turn = 24 hours")]
+      : [DATA.example ? tx("示例数据", "EXAMPLE DATA") : "", vis.name ? NAME : "", vis.handle ? HANDLE : "", tzLabel(), vis.time ? DAYS[CUR_DAY].date + " " + wday(DAYS[CUR_DAY].ymd) : "", dayLenNote, tx("0 点在顶部，指针转一圈 = 一整天", "Midnight at the top, one hand turn = the whole day")];
   return (
     <div style={{ background: theme.bg.base, color: theme.text.primary, padding: "24px 16px 36px", fontFamily: theme.font.family }}>
       <div style={{ maxWidth: 1040, margin: "0 auto" }}>
         <div style={{ ...theme.font.heading2, color: theme.text.primary, fontWeight: theme.weight.semibold }}>{title}</div>
         <div style={{ ...theme.font.subtext, color: theme.text.secondary, marginTop: 6, marginBottom: 18, lineHeight: "20px" }}>
-          {[DATA.example ? tx("示例数据", "EXAMPLE DATA") : "", vis.name ? NAME : "", vis.handle ? HANDLE : "", TZ_LABEL, vis.time ? DAYS[CUR_DAY].date + " " + wday(DAYS[CUR_DAY].ymd) : "", dayLenNote, tx("0 点在顶部，指针转一圈 = 一整天", "Midnight at the top, one hand turn = the whole day")]
+          {subParts
             .filter((s) => s !== "")
             .join(" · ")}
         </div>
@@ -3183,8 +3810,9 @@ function Replay() {
         )}
 
         <div ref={wrapRef} style={{ width: "100%" }}>
-        <div style={{ width: fw, height: fh, margin: "0 auto", position: "relative", background: stageBg, borderRadius: 16, padding: 12, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "stretch", justifyContent: "space-evenly", color: "#dbe6f5" }}>
-          {vis.legend ? (
+        <div data-xp-stage="1" data-xp-visual="1" style={PL === null ? { width: fw, height: fh, margin: "0 auto", position: "relative", background: stageBg, borderRadius: 16, padding: 12, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "stretch", justifyContent: "space-evenly", color: "#dbe6f5" } : { width: fw, height: PL.kind === "stack" ? undefined : fh, margin: "0 auto", position: "relative", background: stageBg, borderRadius: REC !== null ? 0 : 16, padding: PL.kind === "stack" ? 12 : 0, boxSizing: "border-box", display: "flex", flexDirection: "column", alignItems: "stretch", justifyContent: PL.kind === "stack" ? "flex-start" : "center", gap: PL.kind === "stack" ? 12 * PL.u : 0, overflow: PL.kind === "stack" ? "visible" : "hidden", color: "#dbe6f5", ...(REC !== null ? { position: "fixed", left: 0, top: 0, margin: 0, zIndex: 100 } : {}) }}>
+          {PL !== null && vis.legend ? <PubPanels l={PL} cur={cur} part="top" /> : null}
+          {PL === null && vis.legend ? (
             <div>
               <div style={{ fontSize: 13, lineHeight: "22px", marginBottom: 4 }}>
                 {legendItem(kcol(style, 0), kindName(0), COUNT_BY_KIND[0])}
@@ -3202,17 +3830,19 @@ function Replay() {
             </div>
           ) : null}
 
-            <div style={{ width: size, height: size, margin: "0 auto", position: "relative", flexShrink: 0 }}>
+            <div style={PL !== null && PL.kind !== "stack" ? { width: size, height: size, position: "absolute", left: Math.round((fw - size) / 2), top: PL.top } : { width: size, height: size, margin: "0 auto", position: "relative", flexShrink: 0 }}>
               <canvas
                 ref={canvasRef}
-                aria-label={tx("24 小时发帖回放表盘 · " + styleNames()[style] + "风格", "24-hour posting replay dial · " + styleNames()[style] + " style")}
+                aria-label={tx(PL !== null ? "24 小时话题热度表盘 · " : "24 小时发帖回放表盘 · " + styleNames()[style] + "风格", (PL !== null ? "24-hour topic heat dial · " : "24-hour posting replay dial · ") + styleNames()[style] + " style")}
                 style={{ width: size, height: size, display: "block", touchAction: "manipulation", cursor: "pointer" }}
                 onPointerMove={onMove}
                 onPointerLeave={onLeave}
                 onPointerUp={onUp}
               />
+              {PL !== null && vis.legend ? <PubPeak size={size} kind={PL.kind} u={PL.u} cur={cur} /> : null}
               {tipEl}
             </div>
+          {PL !== null && vis.legend ? <PubPanels l={PL} cur={cur} part="bottom" /> : null}
 
           {vis.status && HAS_STATUS ? (
             <div style={{ textAlign: "center", fontSize: 13, lineHeight: "22px", height: 22, color: "#9fb2cc" }}>
@@ -3236,7 +3866,7 @@ function Replay() {
                 {tx("从头播放", "Restart")}
               </button>
               <span style={{ fontSize: 13, color: "#c9d6e8", fontVariantNumeric: "tabular-nums", lineHeight: "20px" }}>
-                {vis.time ? tzDT(cur, false) + " " + TZ_LABEL + " · " : ""}{tx("已亮 ", "Lit ")}{fired}/{NODES.length}
+                {vis.time ? tzDT(cur, false) + " " + tzLabel() + " · " : ""}{tx("已亮 ", "Lit ")}{fired}/{NODES.length}
               </span>
             </div>
             <div style={{ display: "inline-flex", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 10, overflow: "hidden" }}>
@@ -3287,10 +3917,11 @@ function Replay() {
                 {tx("示例数据：占位数字，仅用于让页面能渲染，不是真实账号。", "EXAMPLE DATA: placeholder numbers so this page renders. This is not a real account.")}
               </div>
             ) : null}
-            <div style={{ marginBottom: 6 }}>{metricsNote}</div>
-            <div style={{ marginBottom: 6 }}>{followNote}</div>
-            <div style={{ marginBottom: 6 }}>{boardNote}</div>
-            {statusNote !== "" ? <div style={{ marginBottom: 6 }}>{statusNote}</div> : null}
+            {PUB !== null ? pubFoot.map((t, i) => <div key={"p" + i} style={{ marginBottom: 6 }}>{t}</div>) : null}
+            {PUB === null ? <div style={{ marginBottom: 6 }}>{metricsNote}</div> : null}
+            {PUB === null ? <div style={{ marginBottom: 6 }}>{followNote}</div> : null}
+            {PUB === null ? <div style={{ marginBottom: 6 }}>{boardNote}</div> : null}
+            {PUB === null && statusNote !== "" ? <div style={{ marginBottom: 6 }}>{statusNote}</div> : null}
             {fn.extra.map((x, i) => {
               const t = typeof x === "string" ? x : pickNote(x);
               return t === "" ? null : (
@@ -3306,29 +3937,12 @@ function Replay() {
   );
 }
 
-// Reserved public edition: validates mode and topic, shows the title and a placeholder (no dial yet). Any caveat about how numbers were obtained
-// belongs in DATA.footnotes.extra and is shown only here, in the explanation text at the bottom.
-function PublicPlaceholder() {
-  const theme = useGrokTheme();
-  const notes = (DATA.footnotes?.extra ?? []).map(pickNote).filter((x) => x !== "");
-  return (
-    <div style={{ background: theme.bg.base, color: theme.text.primary, padding: "24px 16px 36px", fontFamily: theme.font.family }}>
-      <div style={{ maxWidth: 1040, margin: "0 auto" }}>
-        <div style={{ ...theme.font.heading2, color: theme.text.primary, fontWeight: theme.weight.semibold }}>{pageTitle("")}</div>
-        <div style={{ ...theme.font.subtext, color: theme.text.secondary, marginTop: 6, lineHeight: "20px" }}>
-          {[DATA.example ? tx("示例数据", "EXAMPLE DATA") : "", TOPIC].filter((x) => x !== "").join(" · ")}
-        </div>
-        <div style={{ marginTop: 24, padding: 20, borderRadius: 12, border: "1px solid rgba(255,255,255,0.12)", color: theme.text.secondary, lineHeight: "22px" }}>
-          {tx("公共版（话题热度回放）的数据格式还在制定中，这个版本的渲染器暂时只显示标题，不绘制表盘。", "The public edition (topic-wide heat replay) is reserved: its data format is still being defined, so this renderer version shows the title only and draws no dial yet.")}
-        </div>
-        {notes.length > 0 ? <div style={{ ...theme.font.subtext, color: theme.text.secondary, marginTop: 16, lineHeight: "20px" }}>{notes.join(" ")}</div> : null}
-      </div>
-    </div>
-  );
+if (REC !== null && BAD_DATA === null) {
+  // offline music render in the recorder: the engine reads NODES / DAY through these getters
+  (window as unknown as { __XPULSE_ME?: unknown }).__XPULSE_ME = { MusicEngine, selectDay, get NODES() { return NODES; }, get DAY() { return DAY; }, get LIVE() { return LIVE; } };
 }
 
 export default function App() {
   if (BAD_DATA !== null) return <div style={{ padding: 24, color: "#e0b050", fontFamily: "sans-serif" }}>X Pulse: {BAD_DATA}</div>;
-  if (MODE === "public") return <PublicPlaceholder />;
   return <Replay />;
 }

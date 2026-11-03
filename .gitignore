@@ -2,3 +2,7 @@ __pycache__/
 node_modules/
 tests/out/
 *.pyc
+public/cache/*
+!public/cache/.gitkeep
+public/out/
+public/video/node_modules

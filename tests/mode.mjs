@@ -1,5 +1,5 @@
-// Edition tests (renderer 3.2.0): DATA.mode default / personal / public / invalid, corner title strings in both languages,
-// old data without mode, and the rule that the public visual areas never contain "估" or "estimate".
+// Edition tests (renderer 3.3.0): DATA.mode default / personal / public / invalid, corner title strings in both languages,
+// old data without mode, and the public mode without DATA.pub (a clear message). The real public tests are in public.mjs.
 //   node mode.mjs [renderer.tsx]
 import fs from "fs";
 import path from "path";
@@ -68,30 +68,14 @@ for (const [label, mk] of [["no mode field", (o) => personal(o)], ["mode persona
   check((await first(p)) === "X Pulse · Personal · Yesterday's replay", "empty handle is skipped in the title");
   await p.close();
 }
-// 2. public: reserved shape validates, placeholder, title, no crash, no "估" / "estimate" in the visible areas
+// 2. public: the old reserved shape (3.2.0) is no longer enough: a clear message, no dial, no "估" in the page (full public tests: public.mjs)
 {
   let p = await load(pub());
-  check((await first(p)) === "X Pulse · Public · AI agents", "public en title: " + (await first(p)));
-  await toggleLang(p);
-  check((await first(p)) === "X Pulse · Public · AI agents", "public zh title is the same string");
-  let t = await body(p);
+  const t = await body(p);
+  check(t.includes("DATA.pub is required"), "public without DATA.pub -> message: " + t.split("\n").find((l) => l.includes("DATA")));
+  check(!/估|estimat/i.test(t), "public message has no 估 / estimate");
+  check((await p.evaluate(() => document.querySelectorAll("canvas").length)) === 0, "public without data draws no canvas");
   check(p.errs.length === 0, "public: no console errors " + JSON.stringify(p.errs.slice(0, 2)));
-  check(!/估|estimat/i.test(t), "public placeholder (zh) has no 估 / estimate");
-  await toggleLang(p);
-  t = await body(p);
-  check(!/估|estimat/i.test(t), "public placeholder (en) has no 估 / estimate");
-  check(t.includes("reserved"), "public placeholder explains it is reserved");
-  check((await p.evaluate(() => document.querySelectorAll("canvas").length)) === 0, "public placeholder draws no canvas");
-  await p.close();
-  // estimate caveat appears only in the footnote text (DATA.footnotes.extra)
-  p = await load(pub({ lang: "zh", footnotes: { extra: [{ en: "Numbers are estimated.", zh: "数字为估算口径。" }] } }));
-  t = await body(p);
-  check(t.includes("数字为估算口径。"), "public footnote caveat shown (zh)");
-  check(t.split("\n").slice(0, 3).join(" ").indexOf("估") < 0, "public title / subtitle area has no 估");
-  await p.close();
-  // reserved shape may carry extra fields and no account / tz / days / footnotes at all
-  p = await load(pub({ topic: { name: "  Topic  ", window: "24h" }, whatever: [1, 2, 3] }));
-  check((await first(p)) === "X Pulse · Public · Topic", "public: extra fields ignored, topic trimmed");
   await p.close();
 }
 // 3. invalid
@@ -109,7 +93,7 @@ for (const [label, mk] of [["no mode field", (o) => personal(o)], ["mode persona
   check((await body(p)).includes("DATA.account is missing"), "personal without account -> message");
   await p.close();
   p = await load(personal({ mode: " Public ", topic: { name: "T" } }));
-  check((await first(p)) === "X Pulse · Public · T", "mode is case / space tolerant");
+  check((await body(p)).includes("DATA.pub is required"), "mode is case / space tolerant (\" Public \" is public)");
   await p.close();
 }
 await browser.close();

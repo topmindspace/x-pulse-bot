@@ -9,7 +9,7 @@ This repo holds two editions of X Pulse. They share one renderer file (the dial,
 | edition | what it shows | data | status |
 | --- | --- | --- | --- |
 | **X Pulse (Personal)** (this bot, `mode: "personal"`, the default) | the last day (up to 7 days) of **your own** account: posts, replies, quotes and the feedback they got | measured numbers read through the X API, a missing number stays missing | released; everything in this README |
-| **X Pulse (Public)** (`mode: "public"`) | topic-wide heat over the last 24 hours | estimated; the caveat appears only in the footnote text, never on the dial, the centre board or the bar charts | **reserved / draft**: coming, maintained separately. The renderer accepts the mode and shows a placeholder; see [`public/`](public/README.md) |
+| **X Pulse (Public)** (`mode: "public"`) | topic-wide heat over the last 24 hours | estimated; the caveat appears only in the footnote text, never on the dial, the centre board or the bar charts | **released** (renderer 3.3.0): data chain, dashboard page and 16:9 / 1:1 videos in [`public/`](public/README.md) |
 
 Corner title by mode: personal = `X Pulse · Personal · @handle · <day label>` (Yesterday's replay / Daily replay / Replay of <date>; 「昨日回放」/「每日回放」/「<date> 回放」), public = `X Pulse · Public · <topic name>`.
 
@@ -32,8 +32,8 @@ dist/x-pulse-replay.min.tsx   the same renderer, minified (what a bot actually w
 tools/build.py                renderer -> dist min (tools/minify, TypeScript 5 compiler API), --typecheck
 tools/fill_data.py            raw X API data -> final page file (std lib + zoneinfo)
 tools/build_avatar.py         profile image -> small palette avatar block for DATA.avatar
-public/                       reserved for the Public edition's data tools (README only for now)
-tests/                        headless-Chrome tests (optional): run.mjs, lang.mjs, days.mjs, dash.mjs, mode.mjs, page.mjs; test_fill_data.py
+public/                       X Pulse (Public): fetch plan, ingest, fill, video recorder, config (see public/README.md)
+tests/                        headless-Chrome tests (optional): run.mjs, lang.mjs, days.mjs, dash.mjs, mode.mjs, public.mjs, page.mjs; test_fill_data.py, test_public.py
 ```
 
 Raw URL for a bot to fetch (stable, `main` branch):
@@ -93,7 +93,7 @@ Bot rules: never edit anything outside the DATA block unless you are changing th
 type Num = number | null;
 type Note = string | { en?: string; zh?: string };
 interface Data {
-  mode?: "personal" | "public";  // edition; missing => "personal" (any other value shows an error text). "public" is reserved, see below
+  mode?: "personal" | "public";  // edition; missing => "personal" (any other value shows an error text). "public" see `mode: "public"` below
   lang: "en" | "zh";          // initial UI language; missing / unknown => "en"; the viewer can switch on the page
   example: boolean;           // true = placeholder data, page says so
   account: { name: string; username: string };   // "@" optional; empty strings hide the item
@@ -136,17 +136,9 @@ Posts do not need their full text: the renderer shows the snippet only, and tole
 
 Behaviour worth knowing: items with no data (no status, no baseline, no name…) are hidden instead of showing zeros; a long name shrinks and wraps, it is never truncated; an invalid avatar falls back to the letter placeholder; an unknown `tz.iana`, a missing `tz`, or a bad `date` shows a clear error text instead of a broken dial.
 
-### Reserved: `mode: "public"` (draft)
+### `mode: "public"` (since 3.3.0)
 
-Renderer 3.2.0 only reserves the entry point. The public data format will be defined later (by the bot that maintains the Public edition); until then only this minimal shape is validated, and the page shows the title plus a placeholder message instead of a dial:
-
-```ts
-{ mode: "public", lang: "en" | "zh", example?: boolean,
-  topic: { name: string },                      // REQUIRED, non-blank; shown as the title "X Pulse · Public · <name>"
-  footnotes?: { extra?: Note[] } }              // optional; shown as explanation text under the placeholder
-```
-
-Other fields are ignored (`account`, `tz` and `days` are not needed). A missing or blank `topic.name`, or a `mode` other than `"personal"` / `"public"`, shows an error text. Rule for the future public view: the visual areas (dial, centre board, bar charts) never carry the character 「估」 or the word "estimate"; caveats about estimated numbers go only into the side / footnote explanation text. This shape may change without notice.
+Topic-wide heat over the last 24 hours. The data is produced by [`public/`](public/README.md) (`fill_public.py`), not written by hand; the shape is validated with `DATA.pub.…` messages. Main fields: `topic{name,title{zh,en}}`, `tz{iana,label{zh,en}}`, `window{startISO,endISO,tz}`, `posts` rows `[t,flags,v,l,r,c,q,id,text]` (`id: null` = scaled dot), `followers.segments`, `footnotes`, and `pub{N,M,cardHours,hours{posts,reposts,tier},cum{posters,commenters,reposts},totals,hot,scope,caveat}` (1 dot = N posts, 1 comet = M posters, at most 8 real hot posts). Only aggregates, scaled sample dots and the hot posts are injected. Rule: the visual areas (dial, centre board, bars) never carry 「估」 / "est."; the caveat sits in the sidebar (`data-xp-caveat`) and the footnotes.
 
 ## Worldwide notes
 
@@ -217,7 +209,8 @@ Needs Node 20+, Python 3 with Pillow, and Chrome / Chromium (`CHROME_PATH` to ov
 - `run.mjs` (about 8 minutes): about 25 scenarios (example data, full data in both languages, zero / one / 600 posts, all-null metrics, first run, very long and emoji names, bad avatar, unsafe URLs, bad window, other time zones…), each also switching every music style, scrubbing, pausing and changing speed, then rendering the music offline; fails on any page error, network request or `NaN` / `undefined` in the page.
 - `lang.mjs`: language seeding (`en`, `zh`, missing, unknown, `zh-CN`), switching by button and `L`, no leftover other-language words in the page or on the canvas, notes, `localStorage` rules (including a denied or corrupt store), layout at 1:1, 9:16, 16:9 and 390 px wide, screenshots in `tests/out/lang/`.
 - `days.mjs`: day boundaries for 15 zone / date cases (DST 23 h / 25 h, +05:30, +05:45, +14, −12, a 30-minute DST shift, a skipped midnight), tick counts, local-day bucketing around midnight and the repeated hour, chips and day switching at three widths, relative-time rows, legacy data, error messages, grapheme cutting, size numbers and frame rate for 7 days × 300 posts.
-- `mode.mjs`: the edition switch: corner titles for personal (no `mode` field, `"personal"`, one / many / older day, no handle) and public in both languages, the reserved public shape and its error texts, no 「估」 / "estimate" in the public page, no console errors.
+- `mode.mjs`: the edition switch: corner titles for personal (no `mode` field, `"personal"`, one / many / older day, no handle) and public in both languages, the public shape and its error texts, no 「估」 / "estimate" in the public page, no console errors.
+- `public.mjs`: the Public edition: validation messages, EN / 中文, no 「估」 / "est." in canvas text or DOM outside the caveat spans over five layouts, panel overflow and font floor, centre board = sidebar totals, hot card, recorder hook. `test_public.py` covers the data chain.
 - `dash.mjs`: live status at calm / busy / peak moments in both languages and all three ratios, level changes during real playback, centre-dashboard screenshots in `tests/out/dash/`.
 
 `node page.mjs page.tsx [outdir] [lang]` renders any finished page file (for example the output of `fill_data.py`) in headless Chrome, fails on page errors, network requests or `NaN` / `undefined`, and saves start / middle / end screenshots.
@@ -241,7 +234,7 @@ The code comments are in English; the page itself is bilingual.
 | 版本 | 看什么 | 数据 | 状态 |
 | --- | --- | --- | --- |
 | **X Pulse (Personal) 个人版**（本 bot，`mode: "personal"`，默认） | **你自己账号**最近一天（最多 7 天）的发帖、回复、引用和得到的反馈 | 通过 X API 读取的实测数据，缺失的数字就是缺失 | 已发布；本 README 讲的都是它 |
-| **X Pulse (Public) 公共版**（`mode: "public"`） | 某个话题圈最近 24 小时的全网热度 | 估算口径；说明只出现在脚注文字里，表盘、中心看板和柱图上不出现 | **预留 / 草案**：即将推出，单独维护。渲染器目前只认这个模式并显示占位提示，见 [`public/`](public/README.md) |
+| **X Pulse (Public) 公共版**（`mode: "public"`） | 某个话题圈最近 24 小时的全网热度 | 估算口径；说明只出现在脚注文字里，表盘、中心看板和柱图上不出现 | **已发布**（渲染器 3.3.0）：数据链路、看板页面和 16:9 / 1:1 视频都在 [`public/`](public/README.md) |
 
 按模式生成的角标标题：个人版 = `X Pulse · Personal · @账号 · <日期标签>`（「昨日回放」/「每日回放」/「<日期> 回放」，英文为 Yesterday's replay / Daily replay / Replay of <date>），公共版 = `X Pulse · Public · <话题名>`。
 
@@ -264,7 +257,7 @@ dist/x-pulse-replay.min.tsx   同一个渲染器的压缩版（bot 实际写入�
 tools/build.py                渲染器 -> dist 压缩版（tools/minify，TypeScript 5 编译器 API），--typecheck
 tools/fill_data.py            X API 原始数据 -> 最终页面文件（仅标准库 + zoneinfo）
 tools/build_avatar.py         头像图片 -> DATA.avatar 用的小调色板头像块
-public/                       预留给公共版的数据工具（目前只有 README）
+public/                       X Pulse (Public)：抓取计划、入库、填数、视频录制、配置（见 public/README.md）
 tests/                        无头 Chrome 测试（可选）：run.mjs、lang.mjs、days.mjs、dash.mjs、mode.mjs、page.mjs；test_fill_data.py
 ```
 
@@ -323,7 +316,7 @@ Bot 守则：除非在改渲染器本身，否则不要改 DATA 块以外的任�
 
 字段与上面 English 部分的 TypeScript 定义一致。要点：
 
-- `mode`：版本，`"personal"`（缺失时的默认值）或 `"public"`（预留）；其他值会显示错误提示。
+- `mode`：版本，`"personal"`（缺失时的默认值）或 `"public"`（见下文 `mode: "public"`）；其他值会显示错误提示。
 - `lang`：`"en"` 或 `"zh"`，是初始界面语言（缺失或无法识别 => 英文），观看者可在页面上切换；`example`：`true` 表示占位数据。
 - `account`：`name`、`username`（`@` 可有可无；空字符串则不显示）。`avatar`：`{ size, palette, indices }` 或 `null`。
 - `tz`：`iana` **必填**（如 `"Asia/Shanghai"`、`"America/New_York"`、`"Asia/Kolkata"`、`"Asia/Kathmandu"`），`label` 仅作显示名。缺少 `iana` 时旧写法 `offsetMinutes`（固定偏移，无夏令时）作为兜底。
@@ -352,17 +345,9 @@ Bot 守则：除非在改渲染器本身，否则不要改 DATA 块以外的任�
 
 注意：没有数据的项（没有状态、没有基线、没有名称等）直接隐藏，不显示 0；名称过长会缩小并折行，不会截断；头像数据无效时回退为首字母占位；`tz.iana` 未知、缺少 `tz` 或 `date` 无效时显示明确的错误文字，而不是一个坏掉的表盘。
 
-### 预留：`mode: "public"`（草案）
+### `mode: "public"`（3.3.0 起）
 
-渲染器 3.2.0 只预留入口。公共版的数据格式以后再定（由维护公共版的 bot 负责）；在此之前只校验下面这个最小结构，页面显示标题和一条占位提示，不画表盘：
-
-```ts
-{ mode: "public", lang: "en" | "zh", example?: boolean,
-  topic: { name: string },                      // 必填、非空；标题显示为「X Pulse · Public · <名称>」
-  footnotes?: { extra?: Note[] } }              // 可选；显示在占位提示下方的说明文字里
-```
-
-其他字段会被忽略（不需要 `account`、`tz`、`days`）。`topic.name` 缺失或为空，或 `mode` 不是 `"personal"` / `"public"`，都会显示错误提示。以后公共版的规则：可视化区域（表盘、中心看板、柱图）上不出现「估」字或 "estimate"；估算口径的说明只写在侧栏 / 脚注文字里。这个结构可能随时调整。
+话题最近 24 小时的全网热度。数据由 [`public/`](public/README.md)（`fill_public.py`）生成，不手写；结构用 `DATA.pub.…` 提示校验。主要字段：`topic{name,title{zh,en}}`、`tz{iana,label{zh,en}}`、`window{startISO,endISO,tz}`、`posts` 行 `[t,flags,v,l,r,c,q,id,text]`（`id: null` = 折算点）、`followers.segments`、`footnotes`，以及 `pub{N,M,cardHours,hours{posts,reposts,tier},cum{posters,commenters,reposts},totals,hot,scope,caveat}`（1 点 = N 帖，1 彗星 = M 位发帖人，最多 8 条真实热帖）。只注入聚合结果、折算样本点和热帖。规则：可视化区域（表盘、中心看板、柱图）不出现「估」/ "est."；口径说明放在侧栏（`data-xp-caveat`）和脚注里。
 
 ## 全球使用说明
 
@@ -433,7 +418,8 @@ cd tests && npm install && npm test
 - `run.mjs`（约 8 分钟）：约 25 个场景（示例数据、中英文完整数据、零 / 一 / 600 条帖子、指标全缺失、首次运行、超长和 emoji 名称、坏头像、不安全链接、坏窗口、其他时区等），每个场景还会切换所有音乐风格、拖动、暂停、变速并离线渲染音乐；出现页面错误、网络请求或页面里的 `NaN` / `undefined` 都算失败。
 - `lang.mjs`：语言初始化（`en`、`zh`、缺失、未知、`zh-CN`）、按钮和 `L` 键切换、页面和画布上没有另一种语言的残留词、备注、`localStorage` 规则（包括被拒绝或损坏的存储）、1:1、9:16、16:9 和 390 px 宽下的布局，截图在 `tests/out/lang/`。
 - `days.mjs`：15 个时区 / 日期的日界线（夏令时 23 / 25 小时、+05:30、+05:45、+14、−12、30 分钟夏令时偏移、被跳过的午夜）、刻度数量、午夜前后和重复小时的当地日归档、三种宽度下的日期按钮与切换、相对时间行、旧数据、错误提示、字素截断，以及 7 天 × 300 条的体积和帧率。
-- `mode.mjs`：版本切换：个人版（无 `mode` 字段、`"personal"`、单日 / 多日 / 较早一天、无账号名）和公共版在两种语言下的角标标题、预留的公共版结构及其错误提示、公共版页面不出现「估」/ "estimate"、无控制台错误。
+- `mode.mjs`：版本切换：个人版（无 `mode` 字段、`"personal"`、单日 / 多日 / 较早一天、无账号名）和公共版在两种语言下的角标标题、公共版结构及其错误提示、公共版页面不出现「估」/ "estimate"、无控制台错误。
+- `public.mjs`：公共版：校验提示、中英文、五种版式下画布文字和 DOM（口径标注之外）不出现「估」/ "est."、面板不溢出和字号下限、中心看板 = 侧栏合计、热帖卡、录制接口。`test_public.py` 覆盖数据链路。
 - `dash.mjs`：中英文、三种画幅下静候 / 繁忙 / 峰值时刻的实时状态、真实播放中的级别变化，以及中心看板截图（`tests/out/dash/`）。
 
 `node page.mjs page.tsx [输出目录] [语言]` 会在无头 Chrome 里渲染任何成品页面文件（例如 `fill_data.py` 的输出），出现页面错误、网络请求或 `NaN` / `undefined` 即失败，并保存开头 / 中段 / 结尾截图。

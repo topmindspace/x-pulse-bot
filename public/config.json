@@ -1,0 +1,17 @@
+{
+ "topic": { "name": "AI", "title": { "zh": "AI 圈", "en": "AI" } },
+ "hours": 24,
+ "display_tz": { "iana": "Asia/Shanghai", "label": { "zh": "北京时间", "en": "Beijing time (UTC+8)" } },
+ "sets": [
+  { "id": "en", "lang": "en", "keywords": "AI OR LLM OR \"artificial intelligence\" OR ChatGPT OR OpenAI OR Claude OR Gemini OR Grok OR Anthropic OR \"AI agent\"" },
+  { "id": "zh", "lang": "zh", "keywords": "AI OR 人工智能 OR 大模型 OR ChatGPT OR DeepSeek OR 智能体 OR 豆包 OR 通义 OR Claude OR Gemini" }
+ ],
+ "budget": { "max_calls": 25, "se_stop": 0.3 },
+ "inject": { "nodes_range": [600, 900], "comets_target": 40, "winsor_cap": 0.975 },
+ "hot": {
+  "max": 8, "floor_views": 2000, "min_gap_h": 2.0, "card_hours": 1.9,
+  "match": "\\bAI\\b|\\bLLMs?\\b|GPT|Claude|Gemini|Grok|OpenAI|Anthropic|DeepSeek|Codex|Qwen|Sora|\\bagents?\\b|\\bmodels?\\b|大模型|人工智能|智能体|模型|算力"
+ },
+ "people": { "source": "calibration", "posts_per_author": 2.0, "replies_per_commenter": 2.7 },
+ "db": null
+}

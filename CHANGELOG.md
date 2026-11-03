@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.3.1 (2026-11-03)
+
+- **Public square layout (1:1 page and video) no longer shows any caveat wording**: the small "估算值" / "estimated" span in the header box is removed. The caveat stays in the wide / stacked sidebar and in the page footnotes. `tests/public.mjs` now asserts that the square stage has no `data-xp-caveat` and no 估 / est. at all. No data or Personal change.
+
 ## 3.3.0 (2026-11-03)
 
 X Pulse (Public) is real: the renderer draws the topic-heat dial, and `public/` holds the data chain, the video recorder and the tests. No change to the Personal DATA schema (v3); old Personal data renders as before, every Personal path is unchanged.

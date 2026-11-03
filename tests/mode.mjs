@@ -1,4 +1,4 @@
-// Edition tests (renderer 3.3.0): DATA.mode default / personal / public / invalid, corner title strings in both languages,
+// Edition tests (renderer 3.3.1): DATA.mode default / personal / public / invalid, corner title strings in both languages,
 // old data without mode, and the public mode without DATA.pub (a clear message). The real public tests are in public.mjs.
 //   node mode.mjs [renderer.tsx]
 import fs from "fs";

@@ -12,7 +12,7 @@ A ready-to-use template for a Grok Bot that shows **how hot a topic is on X over
 | comets | follower change | active posters (1 comet = M people) |
 | centre board | engagement, posts, impressions, followers | views, posts / replies / quotes, engagement, reposts, posters, commenters; ends on the sidebar totals |
 | status word | density of the playhead's last hour | the hour's rank by post volume (5 levels) |
-| caveat | none needed, missing stays missing | **estimated numbers**: the caveat is written only in the sidebar (and page footnotes); the dial, centre board and bars never carry 「估」 / "est." |
+| caveat | none needed, missing stays missing | **estimated numbers**: the caveat is written only in the wide / stacked sidebar and the page footnotes (the square layout and video carry none); the dial, centre board and bars never carry 「估」 / "est." |
 | videos | no | `make_public.sh` |
 
 ## Flow (what the Bot does, at most 25 X calls)
@@ -65,7 +65,7 @@ Exit codes: `fill_public.py` 0 ok, 2 cache / config incomplete, 3 self-check fai
 2. Views are a scaled sample mean of a heavy-tailed variable; the range is wide.
 3. Dots are scaled sample dots, not individual posts (only the hot posts are real and clickable).
 4. A hot post whose own text contains 「估」 will show it (it is a real post, not our wording).
-5. Square videos have no sidebar: the small caveat word sits in the header box and is marked `data-xp-caveat`.
+5. Square (1:1) videos carry no caveat wording at all (no sidebar, no "est." anywhere in the frame); say the caveats in your reply or post text.
 
 ### Tests
 
@@ -93,7 +93,7 @@ Name **X Pulse (Public)**. One line: "Give me a topic and I draw how hot it is o
 | 彗星 | 粉丝变化 | 活跃发帖人（1 颗 = M 人） |
 | 中心看板 | 互动、发帖、曝光、粉丝 | 浏览、原创/评论/引用、互动、转推、发帖人、评论人；转完一圈等于侧栏合计 |
 | 状态词 | 最近一小时的密度 | 该小时的帖量排名（5 档） |
-| 口径说明 | 不需要，缺失就缺失 | **估算值**：说明只写在侧栏（和页面脚注），表盘、中心看板、柱图上不出现「估」/ "est." |
+| 口径说明 | 不需要，缺失就缺失 | **估算值**：说明只写在横版 / 堆叠版侧栏和页面脚注（方版画面和视频里没有），表盘、中心看板、柱图上不出现「估」/ "est." |
 | 视频 | 无 | `make_public.sh` |
 
 ## 流程（Bot 做什么，最多 25 次 X 调用）
@@ -146,7 +146,7 @@ Name **X Pulse (Public)**. One line: "Give me a topic and I draw how hot it is o
 2. 浏览是重尾变量的样本均值折算，区间很宽。
 3. 点是折算的样本点，不是逐条帖（只有热帖是真实、可点开的）。
 4. 热帖正文里若自带「估」字，会照原样显示（那是真实帖子，不是我们的措辞）。
-5. 方版视频没有侧栏：一个小的口径词放在标题框里，标记为 `data-xp-caveat`。
+5. 方版（1:1）视频画面里完全没有口径字样（没有侧栏，也没有「估」/ "est."）；口径请写在回复或发帖文字里。
 
 ### 测试
 

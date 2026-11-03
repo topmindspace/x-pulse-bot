@@ -3,7 +3,7 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 
 // =====================================================================================================
 // X Pulse · daily replay renderer (generic, data-free)
-// Renderer version 3.3.0 (2026-11-03): two editions in one renderer, selected by DATA.mode ("personal" default, or "public").
+// Renderer version 3.3.1 (2026-11-03): two editions in one renderer, selected by DATA.mode ("personal" default, or "public").
 // Personal: 1-7 calendar days in the owner's IANA time zone (DST-aware), date chips, slim compact posts, in-page EN / 中文 switch.
 // Public: topic-wide heat of the last 24 hours (aggregates, scaled sample dots and a few real hot posts), same dial and centre board, bilingual side panels.
 // Bump this line when the renderer changes.
@@ -2827,7 +2827,7 @@ function selectDay(i: number): void {
 if (BAD_DATA === null) selectDay(DAYS.length - 1);
 
 // ---------- public edition: side panels, hot-post card, heat card, peak arc (React, drawn inside the stage frame) ----------
-// Wording rule: the dial, the centre board and the bars never say "estimated"; the only place with that wording is the element marked data-xp-caveat (sidebar) and the page footnotes.
+// Wording rule: the dial, the centre board and the bars never say "estimated"; the only places with that wording are the element marked data-xp-caveat (the wide / stacked sidebar) and the page footnotes. The square layout (and its video) carries no caveat wording at all.
 type PubKind = "wide" | "square" | "stack";
 interface RecCfg {
   layout: PubKind;
@@ -3123,10 +3123,7 @@ function PubSquareTop(p: { u: number }) {
         <span style={{ display: "inline-block", fontSize: F(17, u), padding: "0 " + 14 * u + "px", borderRadius: 12 * u, border: "1px solid rgba(255,214,102,.6)", color: "#ffd666" }}>{["X Pulse", "Public", topicTitle()].join(" · ")}</span>
         <div style={{ fontSize: F(25, u), fontWeight: 700, lineHeight: 1.3, marginTop: 2 * u }}>{pubHeadline()}</div>
         <div style={{ ...cs, color: "#9fb2cc" }}>{pubWindow()}</div>
-        <div style={{ ...cs, color: "#9fb2cc" }}>
-          {tx("浏览 ", "Views ") + fmtC(T.views) + " · "}
-          <span data-xp-caveat="1">{tx("估算值", "estimated")}</span>
-        </div>
+        <div style={{ ...cs, color: "#9fb2cc" }}>{tx("浏览 ", "Views ") + fmtC(T.views)}</div>
       </div>
       <div data-xp-panel="legend" style={boxCss(u, { ...box, right: 16 * u, position: "absolute" })}>
         <div style={cs}>

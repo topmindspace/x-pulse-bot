@@ -86,7 +86,10 @@ for (const [name, opt] of [["stack 480", { w: 480, h: 1800 }], ["square 1100", {
     check(p.errs.length === 0, name + " " + lang + ": no console errors " + JSON.stringify(p.errs.slice(0, 2)));
     {
       const caveat = await p.evaluate(() => [...document.querySelectorAll("[data-xp-caveat]")].map((x) => x.textContent).join(" "));
-      check(BAD.test(caveat), name + " " + lang + ": caveat is present in the sidebar / header caveat span: " + caveat.slice(0, 40));
+      if (name.includes("square")) {
+        const all = await p.evaluate(() => document.querySelector("[data-xp-stage]").textContent || "");
+        check(caveat === "" && !BAD.test(all), name + " " + lang + ": square stage carries no caveat wording at all");
+      } else check(BAD.test(caveat), name + " " + lang + ": caveat is present in the sidebar caveat element: " + caveat.slice(0, 40));
     }
     await p.close();
   }

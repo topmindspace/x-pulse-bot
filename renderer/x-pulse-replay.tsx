@@ -3,8 +3,9 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 
 // =====================================================================================================
 // X Pulse · daily replay renderer (generic, data-free)
-// Renderer version 3.1.0 (2026-11-02): 1-7 calendar days in the owner's IANA time zone (DST-aware), date chips, slim compact posts,
-// in-page EN / 中文 switch. Bump this line when the renderer changes.
+// Renderer version 3.2.0 (2026-11-03): two editions in one renderer, selected by DATA.mode ("personal" default, or "public", reserved).
+// Personal: 1-7 calendar days in the owner's IANA time zone (DST-aware), date chips, slim compact posts, in-page EN / 中文 switch.
+// Bump this line when the renderer changes.
 //
 // This file is a READ-ONLY, NO-NETWORK canvas page. Everything it shows comes from the single DATA object
 // below. A Grok Bot fills DATA from the X API (and its own stored baseline), replaces ONLY the DATA block
@@ -13,6 +14,9 @@ import type { ChangeEvent, PointerEvent } from "grok/canvas";
 // outside the DATA block unless you are changing the renderer itself.
 //
 // DATA schema v3 (see README.md for the full description):
+//   mode        "personal" | "public"            Edition. Missing => "personal" (all v2 / v3 data keeps working unchanged). Anything else is an error text.
+//                                                "public" is RESERVED / DRAFT: only { mode, lang, example?, topic: { name }, footnotes? } is validated and the page
+//                                                shows a placeholder with the title "X Pulse · Public · <topic.name>"; the real public data format is defined later.
 //   lang        "en" | "zh"                      Initial UI language (the owner's Grok Bot language; missing/unknown => "en"). The viewer can switch EN / 中文 on the page.
 //   example     boolean                          true => placeholder data; the page says so in subtitle and footer.
 //   account     { name, username }               display name and handle (with or without a leading "@").
@@ -65,13 +69,15 @@ interface TzIn {
   offsetMinutes?: number;
 }
 interface Data {
+  mode?: string; // "personal" (default when missing) | "public" (reserved)
+  topic?: { name: string; [k: string]: unknown }; // public edition only (reserved / draft)
   lang: string;
   example: boolean;
-  account: { name: string; username: string };
-  avatar: { size: number; palette: string; indices: string } | null;
+  account?: { name: string; username: string }; // personal edition (required there; checked below)
+  avatar?: { size: number; palette: string; indices: string } | null;
   tz?: TzIn;
   days?: { date: string; posts: PostIn[]; followers: FolIn; status: StatusIn | null }[];
-  footnotes: { metricsFetchedAt: string | null; retweetsExcluded: Num; extra: Note[] };
+  footnotes?: { metricsFetchedAt?: string | null; retweetsExcluded?: Num; extra?: Note[] };
   // legacy v2 (single rolling window)
   window?: { startISO: string; endISO: string; tz?: TzIn };
   posts?: PostIn[];
@@ -115,6 +121,18 @@ function normLang(x: unknown): Lang {
   return typeof x === "string" && x.toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
 }
 const LANG0: Lang = normLang(DATA.lang);
+// Edition: missing mode => personal. "public" is reserved (placeholder page only, see publicError()).
+const MODE_RAW: unknown = DATA.mode;
+const MODE: "personal" | "public" = typeof MODE_RAW === "string" && MODE_RAW.trim().toLowerCase() === "public" ? "public" : "personal";
+const MODE_ERR: string | null =
+  MODE_RAW === undefined || MODE_RAW === null || MODE_RAW === "" || (typeof MODE_RAW === "string" && ["personal", "public"].indexOf(MODE_RAW.trim().toLowerCase()) >= 0)
+    ? null
+    : "DATA.mode must be \"personal\" or \"public\"";
+const TOPIC: string = DATA.topic && typeof DATA.topic.name === "string" ? DATA.topic.name.trim() : "";
+// Minimal validation of the reserved public shape: a topic name is required, nothing else.
+function publicError(): string | null {
+  return TOPIC === "" ? "DATA.topic.name is required when DATA.mode is \"public\"" : null;
+}
 let LANG: Lang = LANG0;
 function tx(zh: string, en: string): string {
   return LANG === "zh" ? zh : en;
@@ -160,8 +178,8 @@ const REDUCED: boolean = (() => {
 const KIND_OF: Record<string, number> = { post: 0, reply: 1, quote: 2 };
 const kindName = (i: number): string => [tx("发帖", "Posts"), tx("回复", "Replies"), tx("引用", "Quotes")][i];
 const SAFE_URL = /^https:\/\/(x|twitter)\.com\//;
-const NAME = DATA.account.name.trim();
-const USERNAME = DATA.account.username.trim().replace(/^@+/, "");
+const NAME = typeof DATA.account?.name === "string" ? DATA.account.name.trim() : "";
+const USERNAME = typeof DATA.account?.username === "string" ? DATA.account.username.trim().replace(/^@+/, "") : "";
 const HANDLE = USERNAME === "" ? "" : "@" + USERNAME;
 const MAX_DAYS = 7;
 const SNIP = 40;
@@ -322,10 +340,16 @@ function buildDays(): DayM[] {
   }
   return out;
 }
-const DAYS: DayM[] = buildDays();
-const BAD_DATA: string | null = TZ_ERR !== null ? TZ_ERR : DAYS.length === 0 ? "DATA.days is empty or has no valid date (use \"YYYY-MM-DD\")" : null;
+const DAYS: DayM[] = MODE === "personal" ? buildDays() : [];
+const BAD_DATA: string | null =
+  MODE_ERR !== null ? MODE_ERR
+  : MODE === "public" ? publicError()
+  : DATA.account === undefined || DATA.account === null ? "DATA.account is missing"
+  : TZ_ERR !== null ? TZ_ERR
+  : DAYS.length === 0 ? "DATA.days is empty or has no valid date (use \"YYYY-MM-DD\")"
+  : null;
 // "Yesterday" = the local day before the day the metrics were fetched
-const ASOF = typeof DATA.footnotes.metricsFetchedAt === "string" && BAD_DATA === null ? Date.parse(DATA.footnotes.metricsFetchedAt) / 1000 : NaN;
+const ASOF = typeof DATA.footnotes?.metricsFetchedAt === "string" && BAD_DATA === null ? Date.parse(DATA.footnotes.metricsFetchedAt) / 1000 : NaN;
 const ASOF_KEY = Number.isFinite(ASOF) ? dkey(lparts(ASOF)) : -1;
 const isYesterday = (d: DayM): boolean => {
   const nx = nextDay(d.ymd);
@@ -353,6 +377,13 @@ const wday = (a: [number, number, number]): string => {
     return "";
   }
 };
+// Corner title by edition. Personal: "X Pulse · Personal · @handle · <day label>"; public: "X Pulse · Public · <topic name>".
+// (In the public edition the dial, centre board and bar charts never carry an "estimate" word; caveats go to the footnote text only.)
+function pageTitle(date: string): string {
+  if (MODE === "public") return ["X Pulse", "Public", TOPIC].filter((x) => x !== "").join(" · ");
+  const label = DAYS.length > 1 ? tx("每日回放", "Daily replay") : IS_YDAY ? tx("昨日回放", "Yesterday's replay") : tx(date + " 回放", "Replay of " + date);
+  return ["X Pulse", "Personal", HANDLE, label].filter((x) => x !== "").join(" · ");
+}
 const dayWord = (): string => (IS_YDAY ? tx("昨日", "Yesterday") : tx("当日", "That day"));
 
 const COLS: number[][] = [
@@ -1230,7 +1261,7 @@ function tipW(): number {
 function avatarPixels(): Uint8ClampedArray | null {
   if (AV_TRIED) return AV_PX;
   AV_TRIED = true;
-  const av = DATA.avatar;
+  const av = DATA.avatar ?? null;
   if (av === null) return null;
   try {
     const pal = atob(av.palette);
@@ -2587,7 +2618,7 @@ function selectDay(i: number): void {
   const mx = Math.max(1, ...c);
   ACT = c.map((v) => Math.sqrt(v / mx));
 }
-if (BAD_DATA === null) selectDay(DAYS.length - 1);
+if (BAD_DATA === null && MODE === "personal") selectDay(DAYS.length - 1);
 
 function Replay() {
   const theme = useGrokTheme();
@@ -2977,7 +3008,7 @@ function Replay() {
   );
 
   const fmtInt = (x: number): string => String(Math.round(x)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  const fn = DATA.footnotes;
+  const fn = { metricsFetchedAt: DATA.footnotes?.metricsFetchedAt ?? null, retweetsExcluded: DATA.footnotes?.retweetsExcluded ?? null, extra: DATA.footnotes?.extra ?? [] };
   const metricsNote = [
     fn.metricsFetchedAt !== null
       ? tx("指标抓取于 " + fmtIso(fn.metricsFetchedAt) + "，新帖的曝光与互动仍在增长。", "Metrics fetched at " + fmtIso(fn.metricsFetchedAt) + "; recent posts are still gathering impressions and engagement.")
@@ -3061,7 +3092,7 @@ function Replay() {
   const dd = DAYS[CUR_DAY];
   const hrs = Math.round((DAY / 3600) * 100) / 100;
   const dayLenNote = DAY === 86400 ? "" : tx("该日 " + hrs + " 小时（夏令时切换）", hrs + "-hour day (clock change)");
-  const title = DAYS.length > 1 ? tx("X 脉搏 · 每日回放", "X Pulse · Daily replay") : IS_YDAY ? tx("X 脉搏 · 昨日回放", "X Pulse · Yesterday's replay") : tx("X 脉搏 · " + dd.date + " 回放", "X Pulse · Replay of " + dd.date);
+  const title = pageTitle(dd.date);
   return (
     <div style={{ background: theme.bg.base, color: theme.text.primary, padding: "24px 16px 36px", fontFamily: theme.font.family }}>
       <div style={{ maxWidth: 1040, margin: "0 auto" }}>
@@ -3275,7 +3306,29 @@ function Replay() {
   );
 }
 
+// Reserved public edition: validates mode and topic, shows the title and a placeholder (no dial yet). Any caveat about how numbers were obtained
+// belongs in DATA.footnotes.extra and is shown only here, in the explanation text at the bottom.
+function PublicPlaceholder() {
+  const theme = useGrokTheme();
+  const notes = (DATA.footnotes?.extra ?? []).map(pickNote).filter((x) => x !== "");
+  return (
+    <div style={{ background: theme.bg.base, color: theme.text.primary, padding: "24px 16px 36px", fontFamily: theme.font.family }}>
+      <div style={{ maxWidth: 1040, margin: "0 auto" }}>
+        <div style={{ ...theme.font.heading2, color: theme.text.primary, fontWeight: theme.weight.semibold }}>{pageTitle("")}</div>
+        <div style={{ ...theme.font.subtext, color: theme.text.secondary, marginTop: 6, lineHeight: "20px" }}>
+          {[DATA.example ? tx("示例数据", "EXAMPLE DATA") : "", TOPIC].filter((x) => x !== "").join(" · ")}
+        </div>
+        <div style={{ marginTop: 24, padding: 20, borderRadius: 12, border: "1px solid rgba(255,255,255,0.12)", color: theme.text.secondary, lineHeight: "22px" }}>
+          {tx("公共版（话题热度回放）的数据格式还在制定中，这个版本的渲染器暂时只显示标题，不绘制表盘。", "The public edition (topic-wide heat replay) is reserved: its data format is still being defined, so this renderer version shows the title only and draws no dial yet.")}
+        </div>
+        {notes.length > 0 ? <div style={{ ...theme.font.subtext, color: theme.text.secondary, marginTop: 16, lineHeight: "20px" }}>{notes.join(" ")}</div> : null}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   if (BAD_DATA !== null) return <div style={{ padding: 24, color: "#e0b050", fontFamily: "sans-serif" }}>X Pulse: {BAD_DATA}</div>;
+  if (MODE === "public") return <PublicPlaceholder />;
   return <Replay />;
 }

@@ -36,6 +36,11 @@ def run(cfg, tpl=TPL, max_bytes=None):
 
 
 class T(unittest.TestCase):
+    def test_mode_personal(self):
+        d, s, page = run({})
+        self.assertEqual(d["mode"], "personal")
+        self.assertEqual(list(d)[0], "mode")
+
     def test_day_boundaries_shanghai(self):
         d, s, page = run({"raw_posts": [
             post(1, "2026-10-31T15:59:59Z"),  # 23:59:59 on 10-31 local: before the day

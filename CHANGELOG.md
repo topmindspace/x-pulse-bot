@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.2.0 (2026-11-03)
+
+One repo, two editions, one renderer. No change to the Personal DATA schema (v3); old data without `mode` renders exactly as before.
+
+- **Editions.** The repo now holds **X Pulse (Personal)**, measured data from your own account (this bot, released), and **X Pulse (Public)**, topic-wide heat (coming, maintained separately, estimated numbers). README and changelog say so, EN first, then 中文.
+- **`DATA.mode`** `"personal" | "public"`, default `"personal"` when missing (case / space tolerant; any other value shows an error text). `tools/fill_data.py` now writes `mode: "personal"`.
+- **Public = reserved / draft.** Validation accepts `{ mode: "public", lang, topic: { name }, footnotes?: { extra? } }` (a blank `topic.name` is an error). The page shows the title and a placeholder instead of a dial and never crashes on it; the real public format comes later. Rule: public visual areas (dial, centre board, bar charts) never show 「估」 / "estimate"; caveats only in footnote text.
+- **Corner title by mode.** Personal: `X Pulse · Personal · @handle · <day label>` (Yesterday's replay / Daily replay / Replay of <date>; 「昨日回放」/「每日回放」/「<date> 回放」; the handle is skipped when empty). It replaces the old `X 脉搏 · …` / `X Pulse · …` title and is the same string in both languages except the day label. Public: `X Pulse · Public · <topic name>`.
+- `account`, `footnotes` and `avatar` are read defensively (a missing personal `account` shows "DATA.account is missing" instead of throwing).
+- **Layout.** New `public/` folder (README only) reserved for the public edition's data tools. Every Personal path is unchanged: `renderer/x-pulse-replay.tsx`, `dist/x-pulse-replay.min.tsx`, `tools/fill_data.py`, `tools/build_avatar.py`, `tools/build.py`.
+- Tests: new `tests/mode.mjs` (titles for both modes and languages, reserved public shape, error texts, no 「估」 / "estimate" in the public page); `test_fill_data.py` checks `mode`. `npm test` runs `mode.mjs`.
+
 ## 3.1.0 (2026-11-02)
 
 No change to the DATA schema (v3). Build and data tooling, one renderer fix.

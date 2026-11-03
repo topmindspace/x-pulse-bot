@@ -1,12 +1,25 @@
-# X Pulse · daily replay (Grok Bot canvas template)
+# X Pulse (Personal) · daily replay (Grok Bot canvas template)
 
 **English** · [中文](#中文)
+
+## Two editions, one renderer
+
+This repo holds two editions of X Pulse. They share one renderer file (the dial, effects and music); `DATA.mode` picks the edition and the corner title.
+
+| edition | what it shows | data | status |
+| --- | --- | --- | --- |
+| **X Pulse (Personal)** (this bot, `mode: "personal"`, the default) | the last day (up to 7 days) of **your own** account: posts, replies, quotes and the feedback they got | measured numbers read through the X API, a missing number stays missing | released; everything in this README |
+| **X Pulse (Public)** (`mode: "public"`) | topic-wide heat over the last 24 hours | estimated; the caveat appears only in the footnote text, never on the dial, the centre board or the bar charts | **reserved / draft**: coming, maintained separately. The renderer accepts the mode and shows a placeholder; see [`public/`](public/README.md) |
+
+Corner title by mode: personal = `X Pulse · Personal · @handle · <day label>` (Yesterday's replay / Daily replay / Replay of <date>; 「昨日回放」/「每日回放」/「<date> 回放」), public = `X Pulse · Public · <topic name>`.
+
+**Compatibility.** All Personal file paths stay exactly where they were (`renderer/x-pulse-replay.tsx`, `dist/x-pulse-replay.min.tsx`, `tools/fill_data.py`, `tools/build_avatar.py`, `tools/build.py`): bots that already imported the template download these root paths when the owner asks to update the page template. DATA without a `mode` field is Personal and renders as before.
 
 ## What it is
 
 A single-file, read-only canvas page for Grok Bot that replays one calendar day (or up to 7 days) of an X account as a dial. The dial is a local day, 00:00 at the top; a clock hand sweeps once around it, and every post, reply and quote lights up at its time, sized by impressions and coloured by kind. The centre board shows engagement as the headline number, the post / reply / quote counts, impressions, followers and follower change, plus a **live status word** that follows the intensity of the playhead's last hour.
 
-- Default window: **yesterday**, local 00:00 to 24:00 in the owner's time zone (title "Yesterday's replay" / 「昨日回放」). With several days a compact date chip row switches the dial to a day and restarts playback; the most recent day is selected first.
+- Default window: **yesterday**, local 00:00 to 24:00 in the owner's time zone (title "X Pulse · Personal · @handle · Yesterday's replay" / 「昨日回放」). With several days a compact date chip row switches the dial to a day and restarts playback; the most recent day is selected first.
 - 3 visual styles (Neuron, Galaxy, Neon wave), 3 aspect ratios (1:1, 9:16, 16:9), per-element toggles, play / pause / seek, keyboard shortcuts (Space, ← →, Shift = 1 h, L = language), pinnable tooltips with an "Open post" link.
 - **Bilingual UI (EN / 中文).** The page starts in `DATA.lang` (the owner's Grok Bot language; missing or unknown means English) and a small `EN | 中文` switch in the toolbar (or the `L` key) changes every UI string live: labels, tooltips, settings groups, music names, status texts, footnotes, axis labels, legend, empty and missing states. The viewer's choice is remembered in `localStorage` (only while `DATA.lang` is unchanged; every storage failure is ignored). Post texts are never translated.
 - Shockwave hierarchy and optional generated background music (see below).
@@ -19,7 +32,8 @@ dist/x-pulse-replay.min.tsx   the same renderer, minified (what a bot actually w
 tools/build.py                renderer -> dist min (tools/minify, TypeScript 5 compiler API), --typecheck
 tools/fill_data.py            raw X API data -> final page file (std lib + zoneinfo)
 tools/build_avatar.py         profile image -> small palette avatar block for DATA.avatar
-tests/                        headless-Chrome tests (optional): run.mjs, lang.mjs, days.mjs, dash.mjs, page.mjs; test_fill_data.py
+public/                       reserved for the Public edition's data tools (README only for now)
+tests/                        headless-Chrome tests (optional): run.mjs, lang.mjs, days.mjs, dash.mjs, mode.mjs, page.mjs; test_fill_data.py
 ```
 
 Raw URL for a bot to fetch (stable, `main` branch):
@@ -79,6 +93,7 @@ Bot rules: never edit anything outside the DATA block unless you are changing th
 type Num = number | null;
 type Note = string | { en?: string; zh?: string };
 interface Data {
+  mode?: "personal" | "public";  // edition; missing => "personal" (any other value shows an error text). "public" is reserved, see below
   lang: "en" | "zh";          // initial UI language; missing / unknown => "en"; the viewer can switch on the page
   example: boolean;           // true = placeholder data, page says so
   account: { name: string; username: string };   // "@" optional; empty strings hide the item
@@ -120,6 +135,18 @@ Posts do not need their full text: the renderer shows the snippet only, and tole
 **Size.** Measured with 7 days × 300 posts: 165 KB as unix-time rows with 18-digit ids and 20-character snippets; 154 KB with relative seconds; 121 KB (relative seconds, snippets, no ids); 119 KB (ids, no snippets); 85 KB (relative seconds only). The renderer itself is about 140 KB, and Grok Bot's canvas write limit was seen near 213 KB for the whole file, so a 7-day page with 300 posts every day does not fit. Keep each day to the posts that matter (for example the top 100 by engagement, plus a count in `footnotes.extra`), or send fewer days. Rendering stays at 60 fps with 7 days × 300 posts, and with 600 posts on one day.
 
 Behaviour worth knowing: items with no data (no status, no baseline, no name…) are hidden instead of showing zeros; a long name shrinks and wraps, it is never truncated; an invalid avatar falls back to the letter placeholder; an unknown `tz.iana`, a missing `tz`, or a bad `date` shows a clear error text instead of a broken dial.
+
+### Reserved: `mode: "public"` (draft)
+
+Renderer 3.2.0 only reserves the entry point. The public data format will be defined later (by the bot that maintains the Public edition); until then only this minimal shape is validated, and the page shows the title plus a placeholder message instead of a dial:
+
+```ts
+{ mode: "public", lang: "en" | "zh", example?: boolean,
+  topic: { name: string },                      // REQUIRED, non-blank; shown as the title "X Pulse · Public · <name>"
+  footnotes?: { extra?: Note[] } }              // optional; shown as explanation text under the placeholder
+```
+
+Other fields are ignored (`account`, `tz` and `days` are not needed). A missing or blank `topic.name`, or a `mode` other than `"personal"` / `"public"`, shows an error text. Rule for the future public view: the visual areas (dial, centre board, bar charts) never carry the character 「估」 or the word "estimate"; caveats about estimated numbers go only into the side / footnote explanation text. This shape may change without notice.
 
 ## Worldwide notes
 
@@ -190,6 +217,7 @@ Needs Node 20+, Python 3 with Pillow, and Chrome / Chromium (`CHROME_PATH` to ov
 - `run.mjs` (about 8 minutes): about 25 scenarios (example data, full data in both languages, zero / one / 600 posts, all-null metrics, first run, very long and emoji names, bad avatar, unsafe URLs, bad window, other time zones…), each also switching every music style, scrubbing, pausing and changing speed, then rendering the music offline; fails on any page error, network request or `NaN` / `undefined` in the page.
 - `lang.mjs`: language seeding (`en`, `zh`, missing, unknown, `zh-CN`), switching by button and `L`, no leftover other-language words in the page or on the canvas, notes, `localStorage` rules (including a denied or corrupt store), layout at 1:1, 9:16, 16:9 and 390 px wide, screenshots in `tests/out/lang/`.
 - `days.mjs`: day boundaries for 15 zone / date cases (DST 23 h / 25 h, +05:30, +05:45, +14, −12, a 30-minute DST shift, a skipped midnight), tick counts, local-day bucketing around midnight and the repeated hour, chips and day switching at three widths, relative-time rows, legacy data, error messages, grapheme cutting, size numbers and frame rate for 7 days × 300 posts.
+- `mode.mjs`: the edition switch: corner titles for personal (no `mode` field, `"personal"`, one / many / older day, no handle) and public in both languages, the reserved public shape and its error texts, no 「估」 / "estimate" in the public page, no console errors.
 - `dash.mjs`: live status at calm / busy / peak moments in both languages and all three ratios, level changes during real playback, centre-dashboard screenshots in `tests/out/dash/`.
 
 `node page.mjs page.tsx [outdir] [lang]` renders any finished page file (for example the output of `fill_data.py`) in headless Chrome, fails on page errors, network requests or `NaN` / `undefined`, and saves start / middle / end screenshots.
@@ -202,15 +230,28 @@ The code comments are in English; the page itself is bilingual.
 
 <a id="中文"></a>
 
-# X 脉搏 · 每日回放（Grok Bot 画布模板）
+# X Pulse (Personal) 个人版 · 每日回放（Grok Bot 画布模板）
 
-[English](#x-pulse--daily-replay-grok-bot-canvas-template) · **中文**
+[English](#x-pulse-personal--daily-replay-grok-bot-canvas-template) · **中文**
+
+## 两个版本，一个渲染器
+
+这个仓库放 X Pulse 的两个版本，共用同一个渲染器文件（表盘、特效和音乐）；用 `DATA.mode` 选版本和角标标题。
+
+| 版本 | 看什么 | 数据 | 状态 |
+| --- | --- | --- | --- |
+| **X Pulse (Personal) 个人版**（本 bot，`mode: "personal"`，默认） | **你自己账号**最近一天（最多 7 天）的发帖、回复、引用和得到的反馈 | 通过 X API 读取的实测数据，缺失的数字就是缺失 | 已发布；本 README 讲的都是它 |
+| **X Pulse (Public) 公共版**（`mode: "public"`） | 某个话题圈最近 24 小时的全网热度 | 估算口径；说明只出现在脚注文字里，表盘、中心看板和柱图上不出现 | **预留 / 草案**：即将推出，单独维护。渲染器目前只认这个模式并显示占位提示，见 [`public/`](public/README.md) |
+
+按模式生成的角标标题：个人版 = `X Pulse · Personal · @账号 · <日期标签>`（「昨日回放」/「每日回放」/「<日期> 回放」，英文为 Yesterday's replay / Daily replay / Replay of <date>），公共版 = `X Pulse · Public · <话题名>`。
+
+**兼容性。** 个人版的所有文件路径都保持不变（`renderer/x-pulse-replay.tsx`、`dist/x-pulse-replay.min.tsx`、`tools/fill_data.py`、`tools/build_avatar.py`、`tools/build.py`）：已经导入过模板的 bot 在用户说「更新页面模板」时会从这些根路径下载文件。没有 `mode` 字段的 DATA 就是个人版，渲染方式和以前一样。
 
 ## 这是什么
 
 给 Grok Bot 用的单文件只读画布页面：把一个 X 账号的一个自然日（或最多 7 天）回放成一个表盘。表盘是用户当地的一整天，0 点在顶部；指针转一圈，每条发帖、回帖、引用在对应时刻亮起，大小看曝光、颜色看类型。中心看板以互动数为主角，并显示发帖 / 回帖 / 引用条数、曝光、粉丝、关注变化，再加一个跟随播放头最近一小时强度实时变化的**状态词**。
 
-- 默认窗口：**昨天**，即用户所在时区的当地 0 点到 24 点（标题「昨日回放」/ "Yesterday's replay"）。有多天时会出现紧凑的日期按钮行，点击切换表盘到那一天并重新播放，默认选中最近一天。
+- 默认窗口：**昨天**，即用户所在时区的当地 0 点到 24 点（标题「X Pulse · Personal · @账号 · 昨日回放」/ "Yesterday's replay"）。有多天时会出现紧凑的日期按钮行，点击切换表盘到那一天并重新播放，默认选中最近一天。
 - 3 种风格（神经元、星系、霓虹声波），3 种画幅（1:1、9:16、16:9），每个元素可单独开关，播放 / 暂停 / 拖动，快捷键（空格、← →、Shift = 1 小时、L = 语言），浮层可点击固定并带“打开帖子”链接。
 - **界面中英双语（EN / 中文）。** 页面以 `DATA.lang`（用户 Grok Bot 的语言；缺失或无法识别时为英文）起步，工具栏里有紧凑的 `EN | 中文` 切换（或按 `L` 键），所有界面文字即时切换：标签、浮层、设置分组、音乐名称、状态文字、脚注、坐标轴、图例、空数据和缺失提示。观看者的选择记在 `localStorage`（仅在 `DATA.lang` 不变时沿用；存储失败一律忽略）。帖子文本不翻译。
 - 冲击波分级与可选的程序生成背景音乐（见下）。
@@ -223,7 +264,8 @@ dist/x-pulse-replay.min.tsx   同一个渲染器的压缩版（bot 实际写入�
 tools/build.py                渲染器 -> dist 压缩版（tools/minify，TypeScript 5 编译器 API），--typecheck
 tools/fill_data.py            X API 原始数据 -> 最终页面文件（仅标准库 + zoneinfo）
 tools/build_avatar.py         头像图片 -> DATA.avatar 用的小调色板头像块
-tests/                        无头 Chrome 测试（可选）：run.mjs、lang.mjs、days.mjs、dash.mjs、page.mjs；test_fill_data.py
+public/                       预留给公共版的数据工具（目前只有 README）
+tests/                        无头 Chrome 测试（可选）：run.mjs、lang.mjs、days.mjs、dash.mjs、mode.mjs、page.mjs；test_fill_data.py
 ```
 
 Bot 取文件用的稳定原始链接（`main` 分支）：
@@ -281,6 +323,7 @@ Bot 守则：除非在改渲染器本身，否则不要改 DATA 块以外的任�
 
 字段与上面 English 部分的 TypeScript 定义一致。要点：
 
+- `mode`：版本，`"personal"`（缺失时的默认值）或 `"public"`（预留）；其他值会显示错误提示。
 - `lang`：`"en"` 或 `"zh"`，是初始界面语言（缺失或无法识别 => 英文），观看者可在页面上切换；`example`：`true` 表示占位数据。
 - `account`：`name`、`username`（`@` 可有可无；空字符串则不显示）。`avatar`：`{ size, palette, indices }` 或 `null`。
 - `tz`：`iana` **必填**（如 `"Asia/Shanghai"`、`"America/New_York"`、`"Asia/Kolkata"`、`"Asia/Kathmandu"`），`label` 仅作显示名。缺少 `iana` 时旧写法 `offsetMinutes`（固定偏移，无夏令时）作为兜底。
@@ -308,6 +351,18 @@ Bot 守则：除非在改渲染器本身，否则不要改 DATA 块以外的任�
 **体积。** 实测 7 天 × 每天 300 条：unix 时间 + 18 位 id + 20 字符片段为 165 KB；用相对秒数为 154 KB；相对秒数 + 片段、不带 id 为 121 KB；带 id、不带片段为 119 KB；只有相对秒数为 85 KB。渲染器本身约 140 KB，而 Grok Bot 画布整个文件的写入上限曾见约 213 KB，所以每天 300 条的 7 天页面放不下。请让每天只保留重要的帖子（例如互动最高的前 100 条，总数写进 `footnotes.extra`），或减少天数。7 天 × 300 条以及单日 600 条时仍可保持 60 帧。
 
 注意：没有数据的项（没有状态、没有基线、没有名称等）直接隐藏，不显示 0；名称过长会缩小并折行，不会截断；头像数据无效时回退为首字母占位；`tz.iana` 未知、缺少 `tz` 或 `date` 无效时显示明确的错误文字，而不是一个坏掉的表盘。
+
+### 预留：`mode: "public"`（草案）
+
+渲染器 3.2.0 只预留入口。公共版的数据格式以后再定（由维护公共版的 bot 负责）；在此之前只校验下面这个最小结构，页面显示标题和一条占位提示，不画表盘：
+
+```ts
+{ mode: "public", lang: "en" | "zh", example?: boolean,
+  topic: { name: string },                      // 必填、非空；标题显示为「X Pulse · Public · <名称>」
+  footnotes?: { extra?: Note[] } }              // 可选；显示在占位提示下方的说明文字里
+```
+
+其他字段会被忽略（不需要 `account`、`tz`、`days`）。`topic.name` 缺失或为空，或 `mode` 不是 `"personal"` / `"public"`，都会显示错误提示。以后公共版的规则：可视化区域（表盘、中心看板、柱图）上不出现「估」字或 "estimate"；估算口径的说明只写在侧栏 / 脚注文字里。这个结构可能随时调整。
 
 ## 全球使用说明
 
@@ -378,6 +433,7 @@ cd tests && npm install && npm test
 - `run.mjs`（约 8 分钟）：约 25 个场景（示例数据、中英文完整数据、零 / 一 / 600 条帖子、指标全缺失、首次运行、超长和 emoji 名称、坏头像、不安全链接、坏窗口、其他时区等），每个场景还会切换所有音乐风格、拖动、暂停、变速并离线渲染音乐；出现页面错误、网络请求或页面里的 `NaN` / `undefined` 都算失败。
 - `lang.mjs`：语言初始化（`en`、`zh`、缺失、未知、`zh-CN`）、按钮和 `L` 键切换、页面和画布上没有另一种语言的残留词、备注、`localStorage` 规则（包括被拒绝或损坏的存储）、1:1、9:16、16:9 和 390 px 宽下的布局，截图在 `tests/out/lang/`。
 - `days.mjs`：15 个时区 / 日期的日界线（夏令时 23 / 25 小时、+05:30、+05:45、+14、−12、30 分钟夏令时偏移、被跳过的午夜）、刻度数量、午夜前后和重复小时的当地日归档、三种宽度下的日期按钮与切换、相对时间行、旧数据、错误提示、字素截断，以及 7 天 × 300 条的体积和帧率。
+- `mode.mjs`：版本切换：个人版（无 `mode` 字段、`"personal"`、单日 / 多日 / 较早一天、无账号名）和公共版在两种语言下的角标标题、预留的公共版结构及其错误提示、公共版页面不出现「估」/ "estimate"、无控制台错误。
 - `dash.mjs`：中英文、三种画幅下静候 / 繁忙 / 峰值时刻的实时状态、真实播放中的级别变化，以及中心看板截图（`tests/out/dash/`）。
 
 `node page.mjs page.tsx [输出目录] [语言]` 会在无头 Chrome 里渲染任何成品页面文件（例如 `fill_data.py` 的输出），出现页面错误、网络请求或 `NaN` / `undefined` 即失败，并保存开头 / 中段 / 结尾截图。

@@ -27,6 +27,8 @@ INPUT JSON
   max_bytes              int, optional                   size budget of the whole page file (default 205000 bytes; the canvas write limit is ~213 KB)
   example                bool, optional                  default false
 
+The page always gets DATA.mode = "personal" (renderer 3.2.0+; older renderers ignore the field). The public edition has its own tools later (public/).
+
 WHAT IT DOES
   * buckets posts into the owner's local calendar days (00:00 to the next local 00:00; 23/25 h DST days, +05:30 / +05:45 zones work)
   * drops pure retweets and counts them (footnotes.retweetsExcluded); posts of other authors are ignored
@@ -401,6 +403,7 @@ def build(cfg, template_text, max_bytes=None):
             zh = "体积上限：每天只保留互动 + 曝光最高的帖子（" + "；".join("%s：%d/%d 条" % o for o in omitted) + "）。未显示的帖子不绘制，也不计入中央累计。"
             extra.append({"en": en, "zh": zh})
         data = {
+            "mode": "personal",
             "lang": lang,
             "example": bool(cfg.get("example", False)),
             "account": {"name": acc.get("name") or "", "username": acc.get("username") or ""},
